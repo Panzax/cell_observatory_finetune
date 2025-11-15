@@ -1,0 +1,35 @@
+# Points to the FinetuneSwinUNETR class in models/meta_arch/swin_unetr.py
+_target_: cell_observatory_finetune.models.meta_arch.swin_unetr.FinetuneSwinUNETR
+
+# These reference variables from the experiment config (pulled in dynamically)
+input_fmt: ${dataset_layout_order}         # I think this should be TZYXC
+input_shape: ${datasets.input_shape}       
+patch_shape: ${datasets.patch_shape}        
+
+# Use predefined model size (loads feature_size, depths, num_heads from CONFIGS dict)
+model_template: swin-unetr-base
+
+# Model architecture - these override the template if specified
+feature_size: 48                            # Base feature dimension (multiplied per stage)
+depths: [2, 2, 2, 2]                        # Number of transformer blocks per stage
+num_heads: [3, 6, 12, 24]                   # Attention heads per stage
+window_size: 7                              # Local attention window size
+qkv_bias: true                              # Add bias to query/key/value projections
+mlp_ratio: 4.0                              # MLP hidden dim = embed_dim * mlp_ratio
+
+# Normalization and regularization
+norm_name: instance                         # Type of normalization (instance, batch, layer)
+drop_rate: 0.0                              # Dropout rate
+attn_drop_rate: 0.0                         # Attention dropout rate
+dropout_path_rate: 0.0                      # Stochastic depth rate
+normalize: true                             # Normalize intermediate features
+patch_norm: false                           # Apply normalization after patch embedding
+
+# Training optimizations
+use_checkpoint: false                       # Gradient checkpointing (saves memory)
+spatial_dims: 3                             # Number of spatial dimensions (2D or 3D)
+downsample: merging                         # Downsampling strategy (merging or mergingv2)
+use_v2: false                               # Use SwinUNETR v2 with residual conv blocks
+
+# Loss function for training
+loss_fn: l2_masked

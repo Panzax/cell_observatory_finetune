@@ -1,0 +1,40 @@
+# @package _global_
+defaults:
+  - /tasks/channel_split                                    # Task: predict additional channels
+  - /paths/abc                                              # File paths for ABC cluster
+  - /clusters/local                                         # Cluster config (GPUs, CPUs, memory)
+  - /datasets/pretrain_dataset_ray                          # Dataset loader (Ray-based)
+  - /datasets/preprocessor/channel_split_preprocessor       # Data preprocessing for channel_split
+  - /models/swin-unetr/swin_unetr_base                      # <- Our Swin-UNETR model config
+  - /hooks/hooks                                            # Training hooks (logging, checkpointing, etc.)
+  - /checkpoint/checkpoint                                  # Checkpoint saving/loading settings
+  - /loggers/loggers                                        # Logging (WandB, TensorBoard, etc.)
+  - /evaluation/base_evaluator                              # Evaluation metrics
+  - /deepspeed/zero2                                        # DeepSpeed ZeRO-2 optimization
+  - /optimizers/lamb                                        # LAMB optimizer
+  - /schedulers/test_warmup_cosine_decay                    # Learning rate scheduler
+  - /optimizations/optimizations                            # Additional optimizations
+  - /profiling/profiling                                    # Profiling settings
+  - _self_                                                  # This file's configs override all above
+
+# Experiment metadata
+experiment_name: test_swin_unetr_channel_split              # Used for saving checkpoints/logs
+wandb_project: test_finetune_swinunetr                      # WandB project name
+
+# Core settings
+task: pretrain_mae                                          # Task type (kept for compatibility)
+network: swin-unetr                                         # Network identifier
+engine: deepspeed                                           # Training engine (deepspeed or torch)
+distributed_framework: ray                                  # Distributed framework (ray or torch)
+run_type: single_run                                        # single_run, multi_run, or tune
+job_type: train                                             # train or test
+trainer: training.loops.EpochBasedTrainer                   # Trainer class
+loop_per_worker_script: training.loops.train_loop_per_worker # Per-worker training loop
+
+# Data types
+quantization: bfloat16                                      # Training precision
+dataset_dtype: float16                                      # Data loading precision
+storage_dtype: uint16                                       # Storage precision (for zarr files)
+dataset_layout_order: TZYXC                                 # Tensor format: Time, Z, Y, X, Channels
+seed: 42                                                    # Random seed
+
