@@ -34,6 +34,7 @@ rearrange, _ = optional_import("einops", name="rearrange")
 
 __all__ = [
     "SwinUNETR",
+    "FinetuneSwinUNETR",
     "window_partition",
     "window_reverse",
     "WindowAttention",
@@ -1136,13 +1137,29 @@ def filter_swinunetr(key, value):
 from typing import Literal, Optional
 from cell_observatory_finetune.training.losses import get_loss_fn
 from cell_observatory_platform.models.patch_embeddings import calc_num_patches
+from cell_observatory_finetune.models.layers.utils import pack_time, unpack_time
 
 CONFIGS = {
+    'swin-unetr-tiny': {
+        'feature_size': 24,
+        'depths': (2, 2, 2, 2),
+        'num_heads': (3, 6, 12, 24),
+    },
+    'swin-unetr-small': {
+        'feature_size': 48,
+        'depths': (2, 2, 6, 2),
+        'num_heads': (3, 6, 12, 24),
+    },
     'swin-unetr-base': {
         'feature_size': 48,
         'depths': (2, 2, 2, 2),
         'num_heads': (3, 6, 12, 24),
-    }
+    },
+    'swin-unetr-large': {
+        'feature_size': 96,
+        'depths': (2, 2, 2, 2),
+        'num_heads': (3, 6, 12, 24),
+    },
 }
 
 
@@ -1163,7 +1180,10 @@ class FinetuneSwinUNETR(nn.Module):
         output_channels: Optional[int],
         model_template: Literal[
             'swin-unetr',  # custom use feature_size, depths, num_heads to config model
-            'swin-unetr-base'
+            'swin-unetr-tiny',
+            'swin-unetr-small',
+            'swin-unetr-base',
+            'swin-unetr-large',
         ] = 'swin-unetr',
         input_fmt='TZYXC',
         input_shape=(16, 128, 128, 128, 2),
@@ -1252,14 +1272,26 @@ class FinetuneSwinUNETR(nn.Module):
             raise ValueError(f"Unknown task: {self.task}")
         
         # NOTE: SwinUNETR expects input in format [B, C, spatial_dims...]
-        # Framework uses flexible format (TZYXC, etc.)
+        # Framework uses flexible format (TZYXC, ZYXC, etc.)
         # We'll need to handle tensor reshaping/transposition
+        
+        # Determine spatial patch size (skip time dimension if present)
+        if 'T' in self.input_fmt:
+            # patch_shape is [T_patch, Z_patch, Y_patch, X_patch]
+            # Use spatial patch size (all spatial dims should have same patch size)
+            spatial_patch_size = patch_shape[1]
+        else:
+            # patch_shape is [null, Z_patch, Y_patch, X_patch] or [Z_patch, Y_patch, X_patch]
+            if patch_shape[0] is None:
+                spatial_patch_size = patch_shape[1]
+            else:
+                spatial_patch_size = patch_shape[0]
         
         # Instantiate the base SwinUNETR model
         self.swin_unetr = SwinUNETR(
             in_channels=self.in_chans,
             out_channels=model_out_channels,
-            patch_size=patch_shape[0],  # Use first patch dimension
+            patch_size=spatial_patch_size,  # Use spatial patch dimension
             feature_size=self.feature_size,
             depths=self.depths,
             num_heads=self.num_heads,
@@ -1284,47 +1316,66 @@ class FinetuneSwinUNETR(nn.Module):
     
     def _convert_tensor_format(self, x):
         """
-        Convert tensor from framework format (e.g., TZYXC) to model format (BCZYX or BCYX).
+        Convert tensor from framework format to model format using existing utilities.
+        
+        Handles both 3D and 4D data:
+        - 3D: [B, Z, Y, X, C] -> [B, C, Z, Y, X]
+        - 4D: [B, T, Z, Y, X, C] -> [B*T, C, Z, Y, X]
         
         Args:
             x: Input tensor in framework format
             
         Returns:
-            Tensor in model format [B, C, spatial_dims...]
+            tuple: (converted_tensor, batch_size, time_steps)
+                - converted_tensor: Tensor in model format [B, C, ...] or [B*T, C, ...]
+                - batch_size: Original batch size
+                - time_steps: Original time steps (None if no time dimension)
         """
-        # Find channel dimension
-        channel_dim = self.input_fmt.index('C')
+        B = x.shape[0]
         
-        # Move channel to dim 1 (after batch)
-        if channel_dim != 1:
-            # Build permutation to move C to position 1
-            dims = list(range(len(x.shape)))
-            dims.pop(channel_dim)
-            dims.insert(1, channel_dim)
-            x = x.permute(*dims)
-        
-        return x
+        if 'T' in self.input_fmt:
+            # 4D data with time: [B, T, Z, Y, X, C] -> [B*T, C, Z, Y, X]
+            # Use existing pack_time utility
+            x, B, T = pack_time(x, input_format=self.input_fmt, output_format="TCZYX")
+            return x, B, T
+        else:
+            # 3D data without time: [B, Z, Y, X, C] -> [B, C, Z, Y, X]
+            if self.input_fmt == "ZYXC":
+                # Move channel from last to second position
+                x = x.permute(0, 4, 1, 2, 3)
+            else:
+                raise ValueError(f"Unsupported input format for 3D data: {self.input_fmt}")
+            return x, B, None
     
-    def _convert_tensor_back(self, x):
+    def _convert_tensor_back(self, x, B, T):
         """
-        Convert tensor from model format back to framework format.
+        Convert tensor from model format back to framework format using existing utilities.
+        
+        Handles both 3D and 4D data:
+        - 3D: [B, C, Z, Y, X] -> [B, Z, Y, X, C]
+        - 4D: [B*T, C, Z, Y, X] -> [B, T, Z, Y, X, C]
         
         Args:
-            x: Tensor in model format [B, C, spatial_dims...]
+            x: Tensor in model format
+            B: Original batch size
+            T: Original time steps (None if no time dimension)
             
         Returns:
             Tensor in framework format
         """
-        # Find where channel should be in output
-        channel_dim = self.input_fmt.index('C')
-        
-        # Move channel from dim 1 to target position
-        if channel_dim != 1:
-            dims = list(range(len(x.shape)))
-            dims.insert(channel_dim, dims.pop(1))
-            x = x.permute(*dims)
-        
-        return x
+        if T is not None:
+            # 4D data: [B*T, C, Z, Y, X] -> [B, T, Z, Y, X, C]
+            # Use existing unpack_time utility
+            x = unpack_time(x, B, T, input_format="TCZYX", output_format=self.input_fmt)
+            return x
+        else:
+            # 3D data: [B, C, Z, Y, X] -> [B, Z, Y, X, C]
+            if self.input_fmt == "ZYXC":
+                # Move channel from second to last position
+                x = x.permute(0, 2, 3, 4, 1)
+            else:
+                raise ValueError(f"Unsupported input format for 3D data: {self.input_fmt}")
+            return x
     
     @torch.jit.ignore
     def get_num_patches(self):
@@ -1352,14 +1403,14 @@ class FinetuneSwinUNETR(nn.Module):
         targets = meta.get('targets', [None])[0]
         masks = meta.get("masks", [None])[0]
         
-        # Convert input tensor format if needed
-        inputs_converted = self._convert_tensor_format(inputs)
+        # Convert input tensor format and track original dimensions
+        inputs_converted, B, T = self._convert_tensor_format(inputs)
         
         # Forward through SwinUNETR
         predictions = self.swin_unetr(inputs_converted)
         
         # Convert predictions back to framework format
-        predictions = self._convert_tensor_back(predictions)
+        predictions = self._convert_tensor_back(predictions, B, T)
         
         # Compute task-specific loss
         if self.task == "channel_split":
@@ -1393,13 +1444,13 @@ class FinetuneSwinUNETR(nn.Module):
         """
         inputs = data_sample['data_tensor']
         
-        # Convert input tensor format
-        inputs_converted = self._convert_tensor_format(inputs)
+        # Convert input tensor format and track original dimensions
+        inputs_converted, B, T = self._convert_tensor_format(inputs)
         
         # Forward through SwinUNETR
         predictions = self.swin_unetr(inputs_converted)
         
         # Convert predictions back to framework format
-        predictions = self._convert_tensor_back(predictions)
+        predictions = self._convert_tensor_back(predictions, B, T)
         
         return predictions
