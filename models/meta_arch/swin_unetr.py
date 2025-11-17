@@ -1129,9 +1129,19 @@ def filter_swinunetr(key, value):
         return None
 
 
+
+
 ##############################################################
-# Wrapper to integrate the swin_unetr model with the 
-# Cell Observatory fine-tuning repository 
+# Cell Observatory Fine-tuning Framework Integration
+# This wrapper adapts MONAI's SwinUNETR (designed for 3D medical imaging)
+# to work with Cell Observatory's microscopy data pipeline.
+#
+# KEY TRANSLATION JOBS:
+# 1. Data Format: Framework uses TZYXC (channel-last) -> Model needs BCZYX (channel-first)
+# 2. Time Dimension: Framework has 4D data [B,T,Z,Y,X,C] -> Model expects 3D [B,C,Z,Y,X]
+#                    Solution: Merge batch+time into one dimension [B*T,C,Z,Y,X]
+# 3. Input Structure: Framework passes data_sample dict -> Model expects raw tensor
+# 4. Output: Model returns predictions ->  Framework expects (loss_dict, predictions)
 ##############################################################
 
 from typing import Literal, Optional
@@ -1139,6 +1149,8 @@ from cell_observatory_finetune.training.losses import get_loss_fn
 from cell_observatory_platform.models.patch_embeddings import calc_num_patches
 from cell_observatory_finetune.models.layers.utils import pack_time, unpack_time
 
+# Model size configurations
+# Select via model_template parameter in config YAML
 CONFIGS = {
     'swin-unetr-tiny': {
         'feature_size': 24,
@@ -1165,8 +1177,20 @@ CONFIGS = {
 
 class FinetuneSwinUNETR(nn.Module):
     """
-    This class adapts the MONAI SwinUNETR model to work with the Cell Observatory
-    fine-tuning framework's data format and task requirements.
+    Wrapper for MONAI SwinUNETR to work with Cell Observatory fine-tuning framework.
+    
+    This adapter bridges two different conventions:
+    - Repository: Uses TZYXC format, dict-based data, includes loss computation
+    - SwinUNETR: Uses BCZYX format, raw tensors, only returns predictions
+    
+    Key Features:
+    - Handles both 3D (ZYXC) and 4D (TZYXC) data automatically
+    - Uses repository's existing tensor conversion utilities (pack_time/unpack_time)
+    - Supports channel_split and upsample_space tasks
+    - Compatible with multiple model sizes (tiny, small, base, large)
+    
+    Note: decoder and decoder_args parameters are kept for API compatibility but unused
+    (SwinUNETR has an integrated U-Net decoder, unlike MAE/JEPA which use separate decoders)
     """
     
     def __init__(
@@ -1249,6 +1273,8 @@ class FinetuneSwinUNETR(nn.Module):
             self.depths = depths
             self.num_heads = num_heads
         
+        # ========== Data Format Configuration ==========
+        # Store format info (e.g., 'TZYXC' or 'ZYXC')
         self.input_fmt = input_fmt
         self.input_shape = input_shape
         self.patch_shape = patch_shape
@@ -1318,7 +1344,11 @@ class FinetuneSwinUNETR(nn.Module):
         """
         Convert tensor from framework format to model format using existing utilities.
         
-        Handles both 3D and 4D data:
+        The model expects channels in position 1, but framework has them last.
+        For 4D data, we also merge batch and time into a single dimension since
+        SwinUNETR doesn't know about time - it treats each timepoint as a separate sample.
+        
+        Conversions:
         - 3D: [B, Z, Y, X, C] -> [B, C, Z, Y, X]
         - 4D: [B, T, Z, Y, X, C] -> [B*T, C, Z, Y, X]
         
@@ -1327,9 +1357,14 @@ class FinetuneSwinUNETR(nn.Module):
             
         Returns:
             tuple: (converted_tensor, batch_size, time_steps)
-                - converted_tensor: Tensor in model format [B, C, ...] or [B*T, C, ...]
-                - batch_size: Original batch size
-                - time_steps: Original time steps (None if no time dimension)
+                - converted_tensor: Model-ready tensor with channels in position 1
+                - batch_size: Original batch size (needed to split B*T later)
+                - time_steps: Original time steps, or None for 3D data
+        
+        Example:
+            Input:  [2, 16, 128, 128, 128, 2] (2 samples, 16 timepoints, 2 channels)
+            Output: [32, 2, 128, 128, 128]    (32 "samples", 2 channels)
+                    B=2, T=16 (stored for later reconstruction)
         """
         B = x.shape[0]
         
@@ -1361,7 +1396,12 @@ class FinetuneSwinUNETR(nn.Module):
             T: Original time steps (None if no time dimension)
             
         Returns:
-            Tensor in framework format
+            Tensor in framework format (ready for loss computation)
+        
+        Example:
+            Input:  [32, 4, 128, 128, 128]    (32 "samples", 4 output channels)
+                    B=2, T=16
+            Output: [2, 16, 128, 128, 128, 4] (2 samples, 16 timepoints, 4 channels)
         """
         if T is not None:
             # 4D data: [B*T, C, Z, Y, X] -> [B, T, Z, Y, X, C]
@@ -1389,15 +1429,25 @@ class FinetuneSwinUNETR(nn.Module):
     
     def forward(self, data_sample: dict):
         """
-        Forward pass for training.
+        Forward pass for training with loss computation.
+        
+        Flow:
+        1. Extract data from framework dict
+        2. Convert TZYXC -> BCZYX (and merge B*T for 4D)
+        3. Run through SwinUNETR
+        4. Convert BCZYX -> TZYXC (and split B*T for 4D)
+        5. Compute loss in framework format
+        6. Return (loss_dict, predictions) as framework expects
         
         Args:
-            data_sample: Dictionary containing:
-                - 'data_tensor': Input tensor
-                - 'metainfo': Dictionary with targets and masks
+            data_sample: Framework data dict with keys:
+                - 'data_tensor': Input in TZYXC or ZYXC format
+                - 'metainfo': Dict with 'targets' and 'masks'
         
         Returns:
-            Tuple of (loss_dict, predictions)
+            tuple: (loss_dict, predictions)
+                - loss_dict: {'step_loss': scalar_tensor}
+                - predictions: Tensor in framework format (TZYXC/ZYXC)
         """
         inputs, meta = data_sample['data_tensor'], data_sample['metainfo']
         targets = meta.get('targets', [None])[0]
@@ -1427,30 +1477,31 @@ class FinetuneSwinUNETR(nn.Module):
         else:
             raise ValueError(f"Unknown task: {self.task}")
         
-        loss_dict = {
-            "step_loss": loss,
-        }
+        loss_dict = {"step_loss": loss}
         return loss_dict, predictions
     
     def predict(self, data_sample: dict):
         """
-        Inference-only forward pass.
+        Inference-only forward pass (no loss computation).
+        
+        Same conversion process as forward(), but skips loss calculation.
+        Used during evaluation or when generating predictions.
         
         Args:
-            data_sample: Dictionary containing 'data_tensor'
+            data_sample: Dictionary with 'data_tensor' key
         
         Returns:
-            Predictions tensor
+            Predictions tensor in framework format (TZYXC/ZYXC)
         """
         inputs = data_sample['data_tensor']
         
-        # Convert input tensor format and track original dimensions
+        # Convert: TZYXC -> BCZYX (merge B*T if needed)
         inputs_converted, B, T = self._convert_tensor_format(inputs)
         
-        # Forward through SwinUNETR
+        # Model forward
         predictions = self.swin_unetr(inputs_converted)
         
-        # Convert predictions back to framework format
+        # Convert: BCZYX -> TZYXC (split B*T if needed)
         predictions = self._convert_tensor_back(predictions, B, T)
         
         return predictions
