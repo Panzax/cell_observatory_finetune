@@ -1,0 +1,24 @@
+_target_: cell_observatory_finetune.models.meta_arch.unetr.FinetuneUNETR
+input_fmt: ${dataset_layout_order}
+input_shape: ${datasets.input_shape}
+patch_shape: ${datasets.patch_shape}
+
+# Model template configuration
+model_template: unetr-tiny
+
+# UNETR specific parameters - Tiny variant
+in_channels: 1
+out_channels: 2
+img_size: [128, 128, 128]
+proj_type: conv
+norm_name: instance
+conv_block: true
+res_block: true
+dropout_rate: 0.0
+spatial_dims: 3
+qkv_bias: false
+save_attn: false
+
+# Loss function
+loss_fn: l2_masked
+
