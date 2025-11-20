@@ -1,10 +1,12 @@
 # @package _global_
 defaults:
-  - /tasks/channel_split                                    # Task: predict additional channels
+  #TODO: Confirm task name with Hugo
+  - /tasks/semantic_segmentation                            
   - /paths/abc                                              # File paths for ABC cluster
   - /clusters/local                                         # Cluster config (GPUs, CPUs, memory)
   - /datasets/pretrain_dataset_ray                          # Dataset loader (Ray-based)
-  - /datasets/preprocessor/channel_split_preprocessor       # Data preprocessing for channel_split
+  # TODO: Confirm preprocessor name with Hugo
+  - /datasets/preprocessor/semantic_segmentation_preprocessor       # Data preprocessing for channel_split
   - /models/swin-unetr/swin_unetr_base                      # <- Our Swin-UNETR model config
   - /hooks/hooks                                            # Training hooks (logging, checkpointing, etc.)
   - /checkpoint/checkpoint                                  # Checkpoint saving/loading settings
@@ -18,11 +20,12 @@ defaults:
   - _self_                                                  # This file's configs override all above
 
 # Experiment metadata
-experiment_name: test_swin_unetr_channel_split              # Used for saving checkpoints/logs
-wandb_project: test_finetune_swinunetr                      # WandB project name
+# TODO: Confirm experiment name with Hugo
+experiment_name: test_swinunetr_semantic_segmentation       # Used for saving checkpoints/logs
+wandb_project: segmentation_case_study                      # WandB project name
 
 # Core settings
-task: pretrain_mae                                          # Task type (kept for compatibility)
+task: semantic_segmentation                                 # Task type (kept for compatibility)
 network: swin-unetr                                         # Network identifier
 engine: deepspeed                                           # Training engine (deepspeed or torch)
 distributed_framework: ray                                  # Distributed framework (ray or torch)
@@ -35,6 +38,6 @@ loop_per_worker_script: training.loops.train_loop_per_worker # Per-worker traini
 quantization: bfloat16                                      # Training precision
 dataset_dtype: float16                                      # Data loading precision
 storage_dtype: uint16                                       # Storage precision (for zarr files)
-dataset_layout_order: TZYXC                                 # Tensor format: Time, Z, Y, X, Channels
+dataset_layout_order: ZYXC                                  # Tensor format: Z, Y, X, Channels
 seed: 42                                                    # Random seed
 
