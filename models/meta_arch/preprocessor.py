@@ -97,7 +97,7 @@ class FinetunePreprocessor(RayPreprocessor):
     def forward(self, data_sample: dict, data_time: float) -> dict:
         preprocess_time = time.time()
 
-        inputs = data_sample['data_tensor']
+        inputs: torch.Tensor = data_sample['data_tensor']
         meta = data_sample.get('metainfo', {})
 
         if inputs.dtype != self.dtype:
@@ -142,6 +142,17 @@ class FinetunePreprocessor(RayPreprocessor):
             )
         elif self.task == "upsample_time":
             targets = None
+        elif self.task == "semantic_segmentation":
+            if self.channel_idx is None:
+                raise ValueError("Channel axis 'C' not present in input_format; cannot semantic segmentation.")
+            # Masks are stored in the last N+1 channel
+            # Slice out the masks and the inputs depending on the channel axis position
+            indices = [slice(None)] * inputs.ndim
+            indices[self.channel_idx] = slice(-1)
+            masks = inputs[indices].clamp(min=0, max=1).as_type(torch.bool) # NOTE: Assumes all masks are in the same channel
+            indices[self.channel_idx] = slice(None, -1)
+            inputs = inputs[indices]
+            return inputs, masks
         else:
             raise ValueError(f"Unknown task: {self.task}")
 
