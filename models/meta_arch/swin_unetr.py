@@ -1164,7 +1164,7 @@ def filter_swinunetr(key, value):
 ##############################################################
 
 from typing import Literal, Optional
-from cell_observatory_finetune.training.losses import get_loss_fn
+from monai.losses import GeneralizedDiceLoss
 from cell_observatory_platform.models.patch_embeddings import calc_num_patches
 from cell_observatory_finetune.models.layers.utils import pack_time, unpack_time
 
@@ -1249,7 +1249,7 @@ class FinetuneSwinUNETR(nn.Module):
         spatial_dims: int = 3,
         downsample: str = "merging",
         use_v2: bool = False,
-        loss_fn: str = 'l2_masked'
+        loss_fn: str = 'generalized_dice'
     ):
         """
         Args:
@@ -1308,7 +1308,7 @@ class FinetuneSwinUNETR(nn.Module):
         self.output_channels = output_channels
         self.normalize = normalize
         self.spatial_dims = spatial_dims
-        
+    
         # Determine output channels for the model
         if self.task == "channel_split":
             model_out_channels = self.output_channels
@@ -1359,7 +1359,7 @@ class FinetuneSwinUNETR(nn.Module):
         )
         
         # Setup loss function
-        self.loss_fn = get_loss_fn(loss_fn)
+        self.loss_fn = GeneralizedDiceLoss(sigmoid=True)
     
     def _convert_tensor_format(self, x):
         """
@@ -1484,17 +1484,8 @@ class FinetuneSwinUNETR(nn.Module):
         predictions = self._convert_tensor_back(predictions, B, T)
         
         # Compute task-specific loss
-        if self.task == "channel_split":
-            loss = self.loss_fn(predictions, targets, num_patches=self.get_num_patches())
-        elif self.task == "upsample_space":
-            loss = self.loss_fn(predictions, targets, num_patches=self.get_num_patches())
-        elif self.task == "upsample_time":
-            # For time upsampling, only supervise masked timepoints
-            # This would need additional logic similar to MAE
-            raise NotImplementedError("upsample_time task not yet implemented for SwinUNETR")
-        elif self.task == "upsample_spacetime":
-            # For spacetime upsampling
-            raise NotImplementedError("upsample_spacetime task not yet implemented for SwinUNETR")
+        if self.task == "semantic_segmentation":
+            loss = self.loss_fn(predictions, targets)
         else:
             raise ValueError(f"Unknown task: {self.task}")
         
