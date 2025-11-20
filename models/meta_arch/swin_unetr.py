@@ -30,6 +30,8 @@ from monai.networks.blocks import PatchEmbed, UnetOutBlock, UnetrBasicBlock, Une
 from monai.networks.layers import DropPath, trunc_normal_
 from monai.utils import ensure_tuple_rep, look_up_option, optional_import
 
+from ..layers.layers import SwiGLU
+
 rearrange, _ = optional_import("einops", name="rearrange")
 
 __all__ = [
@@ -45,7 +47,6 @@ __all__ = [
     "BasicLayer",
     "SwinTransformer",
 ]
-
 
 class SwinUNETR(nn.Module):
     """
@@ -64,6 +65,7 @@ class SwinUNETR(nn.Module):
         window_size: Sequence[int] | int = 7,
         qkv_bias: bool = True,
         mlp_ratio: float = 4.0,
+        mlp_type: str = "Mlp",
         feature_size: int = 24,
         norm_name: tuple | str = "instance",
         drop_rate: float = 0.0,
@@ -147,6 +149,7 @@ class SwinUNETR(nn.Module):
             depths=depths,
             num_heads=num_heads,
             mlp_ratio=mlp_ratio,
+            mlp_type=mlp_type,
             qkv_bias=qkv_bias,
             drop_rate=drop_rate,
             attn_drop_rate=attn_drop_rate,
@@ -552,6 +555,7 @@ class SwinTransformerBlock(nn.Module):
         window_size: Sequence[int],
         shift_size: Sequence[int],
         mlp_ratio: float = 4.0,
+        mlp_type: str = "Mlp",
         qkv_bias: bool = True,
         drop: float = 0.0,
         attn_drop: float = 0.0,
@@ -596,7 +600,18 @@ class SwinTransformerBlock(nn.Module):
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = Mlp(hidden_size=dim, mlp_dim=mlp_hidden_dim, act=act_layer, dropout_rate=drop, dropout_mode="swin")
+        if mlp_type == "Mlp":
+            self.mlp = Mlp(hidden_size=dim, mlp_dim=mlp_hidden_dim, act=act_layer, dropout_rate=drop, dropout_mode="swin")
+        elif mlp_type == "SwiGLU":
+            if drop > 0.0:
+                raise ValueError("Dropout is not supported for SwiGLU")
+            self.mlp = SwiGLU(
+                input_dim=dim, 
+                hidden_dim=mlp_hidden_dim, 
+                output_dim=dim
+            )
+        else:
+            raise ValueError(f"Invalid MLP type: {mlp_type}")
 
     def forward_part1(self, x, mask_matrix):
         x_shape = x.size()
@@ -837,6 +852,7 @@ class BasicLayer(nn.Module):
         window_size: Sequence[int],
         drop_path: list,
         mlp_ratio: float = 4.0,
+        mlp_type: str = "Mlp",
         qkv_bias: bool = False,
         drop: float = 0.0,
         attn_drop: float = 0.0,
@@ -874,6 +890,7 @@ class BasicLayer(nn.Module):
                     window_size=self.window_size,
                     shift_size=self.no_shift if (i % 2 == 0) else self.shift_size,
                     mlp_ratio=mlp_ratio,
+                    mlp_type=mlp_type,
                     qkv_bias=qkv_bias,
                     drop=drop,
                     attn_drop=attn_drop,
@@ -938,6 +955,7 @@ class SwinTransformer(nn.Module):
         depths: Sequence[int],
         num_heads: Sequence[int],
         mlp_ratio: float = 4.0,
+        mlp_type: str = "Mlp",
         qkv_bias: bool = True,
         drop_rate: float = 0.0,
         attn_drop_rate: float = 0.0,
@@ -1006,6 +1024,7 @@ class SwinTransformer(nn.Module):
                 window_size=self.window_size,
                 drop_path=dpr[sum(depths[:i_layer]) : sum(depths[: i_layer + 1])],
                 mlp_ratio=mlp_ratio,
+                mlp_type=mlp_type,
                 qkv_bias=qkv_bias,
                 drop=drop_rate,
                 attn_drop=attn_drop_rate,
@@ -1218,6 +1237,7 @@ class FinetuneSwinUNETR(nn.Module):
         window_size: Sequence[int] | int = 7,
         qkv_bias: bool = True,
         mlp_ratio: float = 4.0,
+        mlp_type: str = "Mlp",
         norm_name: tuple | str = "instance",
         drop_rate: float = 0.0,
         attn_drop_rate: float = 0.0,
@@ -1324,6 +1344,7 @@ class FinetuneSwinUNETR(nn.Module):
             window_size=window_size,
             qkv_bias=qkv_bias,
             mlp_ratio=mlp_ratio,
+            mlp_type=mlp_type,
             norm_name=norm_name,
             drop_rate=drop_rate,
             attn_drop_rate=attn_drop_rate,
