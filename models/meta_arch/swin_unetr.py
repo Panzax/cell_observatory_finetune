@@ -1219,7 +1219,8 @@ class FinetuneSwinUNETR(nn.Module):
         task: Literal['channel_split', 
                       'upsample_time', 
                       'upsample_space', 
-                      'upsample_spacetime'],
+                      'upsample_spacetime',
+                      'semantic_segmentation'],
         output_channels: Optional[int],
         model_template: Literal[
             'swin-unetr',  # custom use feature_size, depths, num_heads to config model
@@ -1295,6 +1296,8 @@ class FinetuneSwinUNETR(nn.Module):
         
         # ========== Data Format Configuration ==========
         # Store format info (e.g., 'TZYXC' or 'ZYXC')
+        if input_fmt not in ["TZYXC", "ZYXC"]:
+            raise ValueError(f"Unsupported input format. Expected 'TZYXC' or 'ZYXC' but got {input_fmt}")
         self.input_fmt = input_fmt
         self.input_shape = input_shape
         self.patch_shape = patch_shape
@@ -1310,17 +1313,15 @@ class FinetuneSwinUNETR(nn.Module):
         self.spatial_dims = spatial_dims
     
         # Determine output channels for the model
-        if self.task == "channel_split":
-            model_out_channels = self.output_channels
-        elif self.task in ["upsample_space", "upsample_time", "upsample_spacetime"]:
-            model_out_channels = self.in_chans
+        if self.task == "semantic_segmentation":
+            # For semantic segmentation: use output_channels = 1 for binary segmentation
+            if self.output_channels is not None:
+                raise ValueError(f"For semantic segmentation, output_channels must be 1 but got {self.output_channels}")
+            self.output_channels = 1
         else:
             raise ValueError(f"Unknown task: {self.task}")
         
-        # NOTE: SwinUNETR expects input in format [B, C, spatial_dims...]
-        # Framework uses flexible format (TZYXC, ZYXC, etc.)
-        # We'll need to handle tensor reshaping/transposition
-        
+       
         # Determine spatial patch size (skip time dimension if present)
         if 'T' in self.input_fmt:
             # patch_shape is [T_patch, Z_patch, Y_patch, X_patch]
@@ -1336,7 +1337,7 @@ class FinetuneSwinUNETR(nn.Module):
         # Instantiate the base SwinUNETR model
         self.swin_unetr = SwinUNETR(
             in_channels=self.in_chans,
-            out_channels=model_out_channels,
+            out_channels=self.output_channels,
             patch_size=spatial_patch_size,  # Use spatial patch dimension
             feature_size=self.feature_size,
             depths=self.depths,
@@ -1359,7 +1360,12 @@ class FinetuneSwinUNETR(nn.Module):
         )
         
         # Setup loss function
-        self.loss_fn = GeneralizedDiceLoss(sigmoid=True)
+        if self.task == "semantic_segmentation":
+            if loss_fn != "generalized_dice":
+                raise ValueError(f"For semantic segmentation, loss_fn must be 'generalized_dice' but got {loss_fn}")
+            self.loss_fn = GeneralizedDiceLoss(sigmoid=True)
+        else:
+            raise ValueError(f"Unknown task: {self.task}")
     
     def _convert_tensor_format(self, x):
         """
@@ -1454,9 +1460,9 @@ class FinetuneSwinUNETR(nn.Module):
         
         Flow:
         1. Extract data from framework dict
-        2. Convert TZYXC -> BCZYX (and merge B*T for 4D)
+        2. Convert BTZYXC -> (B*T)CZYX or BZYXC -> BCZYX
         3. Run through SwinUNETR
-        4. Convert BCZYX -> TZYXC (and split B*T for 4D)
+        4. Convert (B*T)CZYX -> BTZYXC or BCZYX -> BZYXC
         5. Compute loss in framework format
         6. Return (loss_dict, predictions) as framework expects
         
@@ -1471,23 +1477,33 @@ class FinetuneSwinUNETR(nn.Module):
                 - predictions: Tensor in framework format (TZYXC/ZYXC)
         """
         inputs, meta = data_sample['data_tensor'], data_sample['metainfo']
-        targets = meta.get('targets', [None])[0]
-        masks = meta.get("masks", [None])[0]
+        targets = meta["targets"][0] # BZYX or BTZYX
         
         # Convert input tensor format and track original dimensions
-        inputs_converted, B, T = self._convert_tensor_format(inputs)
+        inputs_converted, B, T = self._convert_tensor_format(inputs) # (B*T)CZYX or BCZYX
         
         # Forward through SwinUNETR
         predictions = self.swin_unetr(inputs_converted)
         
-        # Convert predictions back to framework format
-        predictions = self._convert_tensor_back(predictions, B, T)
-        
-        # Compute task-specific loss
+        # Compute task-specific loss (before converting back to framework format)
         if self.task == "semantic_segmentation":
+            # Convert targets (masks) from BZYX/BTZYX to [B, C, Z, Y, X] format to match predictions
+            # Note: We keep the channel dimension (even if C=1) because MONAI's GeneralizedDiceLoss
+            # expects [B, C, ...] format. Both predictions and targets should have the same shape.
+            if T is not None:
+                # 4D data: targets are [B, T, Z, Y, X] -> need [B*T, C, Z, Y, X]
+                # Reshape to merge batch and time dimensions
+                targets = targets.reshape(B * T, *targets.shape[2:])  # [B*T, Z, Y, X]
+            # Add channel dimension: [B, Z, Y, X] or [B*T, Z, Y, X] -> [B, 1, Z, Y, X] or [B*T, 1, Z, Y, X]
+            targets = targets.unsqueeze(1)  # Add channel dimension at position 1 to match predictions
+            
+            # Both predictions and targets are now in [B, C, Z, Y, X] format (C=1 for binary segmentation)
             loss = self.loss_fn(predictions, targets)
         else:
             raise ValueError(f"Unknown task: {self.task}")
+        
+        # Convert predictions back to framework format for return
+        predictions = self._convert_tensor_back(predictions, B, T)
         
         loss_dict = {"step_loss": loss}
         return loss_dict, predictions
