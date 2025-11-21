@@ -1,12 +1,12 @@
 # @package _global_
 defaults:
   #TODO: Confirm task name with Hugo
-  - /tasks/semantic_segmentation                            
+  - /tasks/boundary_segmentation                            
   - /paths/abc                                              # File paths for ABC cluster
   - /clusters/local                                         # Cluster config (GPUs, CPUs, memory)
   - /datasets/pretrain_dataset_ray                          # Dataset loader (Ray-based)
   # TODO: Confirm preprocessor name with Hugo
-  - /datasets/preprocessor/semantic_segmentation_preprocessor       # Data preprocessing for channel_split
+  - /datasets/preprocessor/finetune_preprocessor       # Data preprocessing for channel_split
   - /models/swin-unetr/swin_unetr_base                      # <- Our Swin-UNETR model config
   - /hooks/hooks                                            # Training hooks (logging, checkpointing, etc.)
   - /checkpoint/checkpoint                                  # Checkpoint saving/loading settings
@@ -21,11 +21,11 @@ defaults:
 
 # Experiment metadata
 # TODO: Confirm experiment name with Hugo
-experiment_name: test_swinunetr_semantic_segmentation       # Used for saving checkpoints/logs
+experiment_name: test_swinunetr_boundary_segmentation       # Used for saving checkpoints/logs
 wandb_project: segmentation_case_study                      # WandB project name
 
 # Core settings
-task: semantic_segmentation                                 # Task type (kept for compatibility)
+task: boundary_segmentation                                 # Task type (kept for compatibility)
 network: swin-unetr                                         # Network identifier
 engine: deepspeed                                           # Training engine (deepspeed or torch)
 distributed_framework: ray                                  # Distributed framework (ray or torch)
