@@ -229,7 +229,7 @@ def instance_map_to_boundary(instance_map: torch.Tensor, boundary_width: int = 1
     else:
         raise ValueError("Only supports 2D or 3D input")
 
-    boundary = torch.zeros_like(instance_map, dtype=torch.float32, device=device)
+    boundary = torch.zeros_like(instance_map, dtype=torch.bool, device=device)
 
     # Compute initial 1-voxel boundary by neighbor comparison
     for shift in shifts:
@@ -282,4 +282,4 @@ def instance_map_to_boundary(instance_map: torch.Tensor, boundary_width: int = 1
                 boundary = (boundary > 0).float()
             boundary = boundary.squeeze(1)
 
-    return boundary.to(dtype=torch.bool) # [B, *spatial]
+    return boundary.bool() # [B, *spatial]
