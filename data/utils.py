@@ -198,3 +198,88 @@ def downsample(
         out.narrow(0, b, 1).copy_(yb.to(inputs.dtype))
     
     return out
+
+
+def instance_map_to_boundary(instance_map: torch.Tensor, boundary_width: int = 1):
+    """
+    Generate a boundary map of specified width from an instance segmentation map.
+
+    Args:
+        instance_map (torch.Tensor): Instance map tensor (N, H, W) or (N, D, H, W) with unique integer labels.
+        boundary_width (int): Desired thickness of the boundary in pixels/voxels (>=1).
+
+    Returns:
+        torch.Tensor: Binary tensor with boundary pixels/voxels set to 1, shape same as instance_map.
+    """
+    ndim = instance_map.dim() - 1  # spatial dims
+    device = instance_map.device
+
+    # Neighbor offsets for 2D or 3D
+    if ndim == 2:
+        shifts = [
+            (-1,0), (1,0), 
+            (0,-1), (0,1),
+        ]
+    elif ndim == 3:
+        shifts = [
+            (-1,0,0), (1,0,0), 
+            (0,-1,0), (0,1,0), 
+            (0,0,-1), (0,0,1),
+        ]
+    else:
+        raise ValueError("Only supports 2D or 3D input")
+
+    boundary = torch.zeros_like(instance_map, dtype=torch.float32, device=device)
+
+    # Compute initial 1-voxel boundary by neighbor comparison
+    for shift in shifts:
+        if ndim == 2:
+            shifted = torch.roll(instance_map, shifts=shift, dims=(1,2))
+            if shift[0] == -1:
+                shifted[:, -1, :] = instance_map[:, -1, :]
+            if shift[0] == 1:
+                shifted[:, 0, :] = instance_map[:, 0, :]
+            if shift[1] == -1:
+                shifted[:, :, -1] = instance_map[:, :, -1]
+            if shift[1] == 1:
+                shifted[:, :, 0] = instance_map[:, :, 0]
+        else:
+            shifted = torch.roll(instance_map, shifts=shift, dims=(1,2,3))
+            if shift[0] == -1:
+                shifted[:, -1, :, :] = instance_map[:, -1, :, :]
+            if shift[0] == 1:
+                shifted[:, 0, :, :] = instance_map[:, 0, :, :]
+            if shift[1] == -1:
+                shifted[:, :, -1, :] = instance_map[:, :, -1, :]
+            if shift[1] == 1:
+                shifted[:, :, 0, :] = instance_map[:, :, 0, :]
+            if shift[2] == -1:
+                shifted[:, :, :, -1] = instance_map[:, :, :, -1]
+            if shift[2] == 1:
+                shifted[:, :, :, 0] = instance_map[:, :, :, 0]
+
+        boundary |= (instance_map != shifted)
+
+    boundary = boundary.float()
+
+    # If boundary width > 1, dilate the boundary
+    if boundary_width > 1:
+        # Create a suitable kernel for dilation depending on dimensionality
+        if ndim == 2:
+            kernel = torch.ones((1, 1, 3, 3), device=device)
+            boundary = boundary.unsqueeze(1)  # add channel dim for conv
+            padding = 1
+            for _ in range(boundary_width - 1):
+                boundary = F.conv2d(boundary, kernel, padding=padding)
+                boundary = (boundary > 0).float()
+            boundary = boundary.squeeze(1)
+        else:
+            kernel = torch.ones((1, 1, 3, 3, 3), device=device)
+            boundary = boundary.unsqueeze(1)  # add channel dim for conv
+            padding = 1
+            for _ in range(boundary_width - 1):
+                boundary = F.conv3d(boundary, kernel, padding=padding)
+                boundary = (boundary > 0).float()
+            boundary = boundary.squeeze(1)
+
+    return boundary.to(dtype=torch.bool) # [B, *spatial]

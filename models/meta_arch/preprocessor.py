@@ -3,7 +3,7 @@ import time
 import torch
 
 from cell_observatory_finetune.training.helpers import mask_ids_to_masks, get_image_sizes
-from cell_observatory_finetune.data.utils import downsample, create_na_masks, resize_mask
+from cell_observatory_finetune.data.utils import downsample, create_na_masks, resize_mask, instance_map_to_boundary
 
 from cell_observatory_platform.data.io import read_file
 from cell_observatory_platform.data.data_types import TORCH_DTYPES, NUMPY_DTYPES
@@ -233,15 +233,14 @@ class FinetunePreprocessor(RayPreprocessor):
             meta['image_sizes'] = image_sizes
             meta['orig_image_sizes'] = orig_image_sizes
         
-        elif self.task == "semantic_segmentation":
+        elif self.task == "boundary_segmentation":
             if self.channel_idx is None:
-                raise ValueError("Channel axis 'C' not present in input_format; cannot semantic segmentation.")
+                raise ValueError("Channel axis 'C' not present in input_format; cannot boundary segmentation.")
             # Masks are stored in the last N+1 channel
             # Slice out the masks and the inputs depending on the channel axis position
             inputs, masks = self._split_inputs_and_masks(inputs)
-            # TODO: generalize to arbitrary number of semantic classes
-            binary_masks = masks.clamp(min=0, max=1).as_type(torch.bool) # Convert instance-id label map to boolean mask
-            targets = binary_masks # [B, *spatial]
+            boundary_masks = instance_map_to_boundary(masks, boundary_width=2)
+            targets = boundary_masks # [B, *spatial]
             image_sizes, orig_image_sizes = get_image_sizes(
                 input_format=self.input_format,
                 input_shape=self.input_shape,
