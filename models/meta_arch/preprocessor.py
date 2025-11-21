@@ -238,12 +238,18 @@ class FinetunePreprocessor(RayPreprocessor):
                 raise ValueError("Channel axis 'C' not present in input_format; cannot semantic segmentation.")
             # Masks are stored in the last N+1 channel
             # Slice out the masks and the inputs depending on the channel axis position
-            indices = [slice(None)] * inputs.ndim
-            indices[self.channel_idx] = slice(-1)
-            masks = inputs[indices].clamp(min=0, max=1).as_type(torch.bool) # NOTE: Assumes all masks are in the same channel
-            indices[self.channel_idx] = slice(None, -1)
-            inputs = inputs[indices]
-            return inputs, masks
+            inputs, masks = self._split_inputs_and_masks(inputs)
+            # TODO: generalize to arbitrary number of semantic classes
+            binary_masks = masks.clamp(min=0, max=1).as_type(torch.bool) # Convert instance-id label map to boolean mask
+            targets = binary_masks # [B, *spatial]
+            image_sizes, orig_image_sizes = get_image_sizes(
+                input_format=self.input_format,
+                input_shape=self.input_shape,
+                batch_size=inputs.shape[0],
+                metadata=meta
+            )
+            meta['image_sizes'] = image_sizes
+            meta['orig_image_sizes'] = orig_image_sizes
         else:
             raise ValueError(f"Unknown task: {self.task}")
 
