@@ -1220,7 +1220,7 @@ class FinetuneSwinUNETR(nn.Module):
                       'upsample_time', 
                       'upsample_space', 
                       'upsample_spacetime',
-                      'semantic_segmentation'],
+                      'boundary_segmentation'],
         output_channels: Optional[int],
         model_template: Literal[
             'swin-unetr',  # custom use feature_size, depths, num_heads to config model
@@ -1313,7 +1313,7 @@ class FinetuneSwinUNETR(nn.Module):
         self.spatial_dims = spatial_dims
     
         # Determine output channels for the model
-        if self.task == "semantic_segmentation":
+        if self.task == "boundary_segmentation":
             # For semantic segmentation: use output_channels = 1 for binary segmentation
             if self.output_channels is not None:
                 raise ValueError(f"For semantic segmentation, output_channels must be 1 but got {self.output_channels}")
@@ -1360,9 +1360,9 @@ class FinetuneSwinUNETR(nn.Module):
         )
         
         # Setup loss function
-        if self.task == "semantic_segmentation":
+        if self.task == "boundary_segmentation":
             if loss_fn != "generalized_dice":
-                raise ValueError(f"For semantic segmentation, loss_fn must be 'generalized_dice' but got {loss_fn}")
+                raise ValueError(f"For boundary segmentation, loss_fn must be 'generalized_dice' but got {loss_fn}")
             self.loss_fn = GeneralizedDiceLoss(sigmoid=True)
         else:
             raise ValueError(f"Unknown task: {self.task}")
@@ -1486,7 +1486,7 @@ class FinetuneSwinUNETR(nn.Module):
         predictions = self.swin_unetr(inputs_converted)
         
         # Compute task-specific loss (before converting back to framework format)
-        if self.task == "semantic_segmentation":
+        if self.task == "boundary_segmentation":
             # Convert targets (masks) from BZYX/BTZYX to [B, C, Z, Y, X] format to match predictions
             # Note: We keep the channel dimension (even if C=1) because MONAI's GeneralizedDiceLoss
             # expects [B, C, ...] format. Both predictions and targets should have the same shape.
