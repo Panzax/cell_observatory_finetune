@@ -26,8 +26,8 @@ from typing import Literal, Optional
 import torch
 import torch.nn as nn
 from cell_observatory_finetune.models.layers.utils import pack_time, unpack_time
-from cell_observatory_finetune.training.losses import get_loss_fn
 from cell_observatory_platform.models.patch_embeddings import calc_num_patches
+from monai.losses import GeneralizedDiceLoss
 from monai.networks.blocks.dynunet_block import UnetOutBlock
 from monai.networks.blocks.unetr_block import (
     UnetrBasicBlock,
@@ -328,7 +328,7 @@ class FinetuneUNETR(nn.Module):
         spatial_dims: int = 3,
         qkv_bias: bool = False,
         save_attn: bool = False,
-        loss_fn: str = "l2_masked",
+        loss_fn: str = "generalized_dice",
     ):
         """
         Args:
@@ -405,7 +405,7 @@ class FinetuneUNETR(nn.Module):
         )
 
         # Initialize loss function
-        self.loss_fn = get_loss_fn(loss_fn)
+        self.loss_fn = GeneralizedDiceLoss(sigmoid=True)
 
     def _convert_tensor_format(self, x: torch.Tensor):
         """
@@ -555,30 +555,8 @@ class FinetuneUNETR(nn.Module):
         predictions = self._convert_tensor_back(predictions, B, T)
 
         # Compute task-specific loss
-        if self.task == "channel_split":
-            loss = self.loss_fn(
-                predictions, targets, num_patches=self.get_num_patches()
-            )
-        elif self.task == "upsample_space":
-            loss = self.loss_fn(
-                predictions, targets, num_patches=self.get_num_patches()
-            )
-        elif self.task == "upsample_time":
-            # For time upsampling, only supervise masked timepoints
-            target_masks = meta.get("target_masks", [None])[0]
-            if target_masks is not None:
-                loss = self.loss_fn(
-                    predictions, targets, num_patches=target_masks.sum()
-                )
-            else:
-                loss = self.loss_fn(
-                    predictions, targets, num_patches=self.get_num_patches()
-                )
-        elif self.task == "upsample_spacetime":
-            # For spacetime upsampling
-            loss = self.loss_fn(
-                predictions, targets, num_patches=self.get_num_patches()
-            )
+        if self.task == "semantic_segmentation":
+            loss = self.loss_fn(predictions, targets)
         else:
             raise ValueError(f"Unknown task: {self.task}")
 
