@@ -205,7 +205,7 @@ def instance_map_to_boundary(instance_map: torch.Tensor, boundary_width: int = 1
     Generate a boundary map of specified width from an instance segmentation map.
 
     Args:
-        instance_map (torch.Tensor): Instance map tensor (N, H, W) or (N, D, H, W) with unique integer labels.
+        instance_map (torch.Tensor): Instance map tensor (N, Y, X) or (N, Z, Y, X) with unique integer labels.
         boundary_width (int): Desired thickness of the boundary in pixels/voxels (>=1).
 
     Returns:
