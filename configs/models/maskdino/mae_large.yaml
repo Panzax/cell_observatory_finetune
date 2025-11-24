@@ -34,18 +34,28 @@ backbone:
   mlp_wide_silu: false
   loss_fn: l2_masked
 
+  decoder: "maskdino"
+  task: "instance_segmentation"
+  output_channels: null
+  decoder_args:
+    encoder_out_layers: [10, 14, 18, 22]  # use these layers from encoder
+
 # NOTE: they seem to use defaults in DINOv3 for adapter when used with plainDETR
 
 # backbone adapter
+input_format: ${dataset_layout_order}
+input_shape: ${datasets.input_shape}
+patch_shape: ${datasets.patch_shape}
+dtype: ${quantization}
 with_backbone_adapter: true
 dim: 3
-backbone_embed_dim: ${models.mae.embed_dim}
-input_format: ${dataset_layout_order} 
+backbone_embed_dim: ${models.backbone.embed_dim}
 num_backbone_features: 4
 add_vit_feature: true
 conv_inplane: 64
 use_deform_attention: true 
 n_points: 4
+n_levels: 1
 deform_num_heads: 16
 drop_path_rate: 0.3
 init_values: 0.0
@@ -55,7 +65,7 @@ deform_ratio: 0.5
 use_extra_extractor: true
 strategy: axial
 spatial_prior_module_strides:
-  stem: [2,2,2]
+  stem1: [2,2,2]
   stem2: [2,2,2]
   stem3: [1,1,1]
   maxpool: 2
@@ -65,17 +75,17 @@ spatial_prior_module_strides:
 
 # MaskDINOEncoder (pixel decoder)
 input_shape_metadata: 
-  1: 
-    channels: ${models.mae.embed_dim}
+  "1": 
+    channels:  ${models.backbone.embed_dim}
     stride: 4
-  2: 
-    channels: ${models.mae.embed_dim}
+  "2": 
+    channels: ${models.backbone.embed_dim}
     stride: 8
-  3: 
-    channels: ${models.mae.embed_dim}
+  "3": 
+    channels: ${models.backbone.embed_dim}
     stride: 16
-  4:
-    channels: ${models.mae.embed_dim}
+  "4":
+    channels: ${models.backbone.embed_dim}
     stride: 32
 
 # potentially use 2,3,4 and keep total_num_feature_levels=4
@@ -86,12 +96,14 @@ transformer_encoder_dropout: 0.1
 transformer_encoder_num_heads: 8
 transformer_encoder_dim_feedforward: 1024
 num_transformer_encoder_layers: 4
-conv_dim: 256
+# NOTE: we needs to be multiple of 32 for GroupNorm and 3
+#       after div by transformer_encoder_num_heads also needs divisible by 8
+conv_dim: 384
 mask_dim: 256
 norm: null
 
 # MaskDINODecoder
-in_channels: ${models.mae.embed_dim}
+in_channels: ${models.conv_dim}
 num_classes: 1
 hidden_dim: 256
 num_queries: 100
@@ -130,13 +142,14 @@ cost_box_giou: 2.0
 # λ_dice = 5."
 
 # criterion
+losses: ["labels", "boxes", "masks"]
+denoise_losses: ["labels", "boxes", "masks"]
+
 no_object_loss_weight: 0.1
-losses: ["loss_mask", "loss_dice", "loss_ce", "loss_bbox", "loss_giou"]
 oversample_ratio: 3.0
 importance_sample_ratio: 0.75
 denoise: true
 with_segmentation: true
-denoise_losses: ["loss_mask", "loss_dice", "loss_ce", "loss_bbox", "loss_giou"]
 semantic_ce_loss: false
 focal_alpha: 0.25
 loss_weight_dict:

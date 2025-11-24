@@ -19,3 +19,7 @@ seed: ${seed}
 ideal_psf_path: null
 na_mask_thresholds: null
 resize_na_masks: null
+mask_idx: -1
+
+bbox_data_format: zyxzyx
+bbox_output_format: cxcyczwhd

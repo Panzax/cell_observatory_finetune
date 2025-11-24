@@ -18,7 +18,7 @@ class MaskDINO(nn.Module):
         self,
         # parameters for modules
         # MaskDINOEncoder (pixel decoder)
-        input_shape: Dict,
+        input_shape_metadata: Dict,
         transformer_in_features: List[str],
         target_min_stride: int,
         total_num_feature_levels: int,
@@ -61,9 +61,9 @@ class MaskDINO(nn.Module):
         # backbone
         backbone: nn.Module,
         # backbone adapter
+        input_shape: tuple[int, int, int],
         with_backbone_adapter: bool,
         dim: int,
-        adapter_in_channels: int,
         backbone_embed_dim: int,
         input_format: str,
         patch_shape: tuple[int, int, int],
@@ -72,6 +72,8 @@ class MaskDINO(nn.Module):
         conv_inplane: int,
         use_deform_attention: bool,
         n_points: int,
+        n_levels: int,
+        dtype: str,
         deform_num_heads: int,
         drop_path_rate: float,
         init_values: float,
@@ -108,8 +110,9 @@ class MaskDINO(nn.Module):
         self.with_adapter = with_backbone_adapter
         if self.with_adapter:
             self.adapter = EncoderAdapter(
+                input_shape=input_shape,
                 dim=dim,
-                in_channels=adapter_in_channels,
+                dtype=dtype,
                 backbone_embed_dim=backbone_embed_dim,
                 input_format=input_format,
                 patch_shape=patch_shape,
@@ -118,6 +121,7 @@ class MaskDINO(nn.Module):
                 conv_inplane=conv_inplane,
                 use_deform_attention=use_deform_attention,
                 n_points=n_points,
+                n_levels=n_levels,
                 deform_num_heads=deform_num_heads,
                 drop_path_rate=drop_path_rate,
                 init_values=init_values,
@@ -139,9 +143,9 @@ class MaskDINO(nn.Module):
         
         self.criterion = DETR_Set_Loss(
             num_classes=num_classes,
-            loss_weight_dict=loss_weight_dict,
             matcher=self.matcher,
-            eos_coef=no_object_loss_weight,
+            loss_weight_dict=loss_weight_dict,
+            no_object_loss_weight=no_object_loss_weight,
             losses=losses,
             num_points=num_points,
             oversample_ratio=oversample_ratio,
@@ -154,7 +158,7 @@ class MaskDINO(nn.Module):
         )
 
         pixel_decoder=MaskDINOEncoder(
-            input_shape=input_shape,
+            input_shape_metadata=input_shape_metadata,
             transformer_in_features=transformer_in_features,
             target_min_stride=target_min_stride,
             total_num_feature_levels=total_num_feature_levels,
@@ -165,6 +169,7 @@ class MaskDINO(nn.Module):
             conv_dim=conv_dim,
             mask_dim=mask_dim,
             norm=norm,
+            dtype=dtype
         )
 
         decoder = MaskDINODecoder(
@@ -191,6 +196,7 @@ class MaskDINO(nn.Module):
             return_intermediates_decoder=return_intermediates_decoder,
             query_dim=query_dim,
             share_decoder_layers=share_decoder_layers,
+            dtype=dtype
         )
 
         self.segmentation_head = MaskDINOHead(
@@ -215,32 +221,35 @@ class MaskDINO(nn.Module):
         Expand a base loss_weight_dict (e.g. {"loss_ce": 4., "loss_mask": 5., ...})
         to include:
           - intermediate head losses:      k + "_intermediate"        (if two_stage_flag)
-          - denoising losses:              k + "_denoise"             (driven by denoise_losses)
+          - denoising losses:              k + "_denoise"             (driven by denoise_losses groups)
           - aux decoder layer losses:      k + f"_{i}"                for i in [0, dec_layers)
           - aux denoising decoder losses:  k + f"_denoise_{i}"
-        The actual loss keys produced are controlled by DETR_Set_Loss; extra
-        entries in the dict are harmless (they're just never used).
         """
         weight_dict = dict(loss_weight_dict)
 
-        # 1. Denoising: base k -> k + "_denoise"
+        # mapping from group name -> scalar loss keys that group produces
+        group_to_keys = {
+            "labels": ["loss_ce"],
+            "boxes": ["loss_bbox", "loss_giou"],
+            "masks": ["loss_mask", "loss_dice"],
+        }
+
+        # 1. Denoising: base k -> k + "_denoise" for selected groups
         if denoise:
             for group in denoise_losses:
-                if base_key in loss_weight_dict:
-                    weight_dict[f"{base_key}_denoise"] = loss_weight_dict[base_key]
+                for k in group_to_keys.get(group, []):
+                    if k in loss_weight_dict:
+                        weight_dict[f"{k}_denoise"] = loss_weight_dict[k]
 
         # 2. Two-stage: intermediate head k -> k + "_intermediate"
         if two_stage_flag:
-            # only use the *main* prediction loss keys (no suffix)
             for base_key, v in loss_weight_dict.items():
-                # don't create intermediate for denoise keys etc.
                 if base_key.endswith("_denoise"):
                     continue
                 weight_dict[f"{base_key}_intermediate"] = v
 
         # 3. Deep supervision over decoder layers: k -> k + f"_{i}"
-        #    This covers both main and *_denoise keys, matching the old
-        #    pattern where aux weights were built from the full weight_dict.
+        #    This covers both main and *_denoise keys
         if decoder_num_layers > 0:
             current_items = list(weight_dict.items())
             aux_weight_dict = {}
@@ -258,10 +267,10 @@ class MaskDINO(nn.Module):
         else:
             features_dict = features
 
-        outputs, denoise_predictions = self.segmentation_head(features_dict, targets=data_sample['metainfo']['targets'])
+        outputs, denoise_predictions = self.segmentation_head(features_dict, targets=data_sample['metainfo']['targets'][0])
 
         # bipartite matching-based loss
-        losses = self.criterion(outputs, data_sample['metainfo']['targets'], denoise_predictions)
+        losses = self.criterion(outputs, data_sample['metainfo']['targets'][0], denoise_predictions)
 
         for loss in list(losses.keys()):
             if loss in self.criterion.loss_weight_dict:

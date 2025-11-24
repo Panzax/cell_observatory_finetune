@@ -1,6 +1,8 @@
+import copy
 from typing import Optional
 
 import torch
+from torch import Tensor, nn
 
 
 def get_supervised_input_data(model, inputs, mask_generator, device: Optional[torch.device] = 'cuda'):
@@ -23,11 +25,13 @@ def get_supervised_input_data(model, inputs, mask_generator, device: Optional[to
     return input_data
 
 
-def mask_ids_to_masks(mask_ids_batch, masks, input_format, input_shape, device):
+def mask_ids_to_masks(batch_size, spatial_shape, mask_ids_batch, masks, input_format, input_shape, device):
     """
     Convert per-sample mask IDs to per-sample binary masks.
 
     Args:
+        batch_size (int): Number of samples in the batch.
+        spatial_shape (tuple): Shape of the spatial dimensions.
         mask_ids_batch (list[list[int]]): For each sample in the batch, a list of instance IDs.
         masks (torch.Tensor): Tensor containing instance-ID maps.
                               Shape: [B, *spatial] or [*spatial] (then B assumed 1).
@@ -40,19 +44,15 @@ def mask_ids_to_masks(mask_ids_batch, masks, input_format, input_shape, device):
                             [NUM_INST_b, *spatial], dtype=bool.
     """
     masks = masks.to(device)
-    if masks.dim() == len(input_shape):
-        masks = masks.unsqueeze(0)  # [1, *spatial]
 
-    B = masks.size(0)
+    B = batch_size
     if len(mask_ids_batch) != B:
         raise ValueError(
             f"mask_ids_batch length ({len(mask_ids_batch)}) "
             f"does not match batch size ({B})."
         )
 
-    spatial_shape = masks.shape[1:]
     binary_masks_batch = []
-
     for b in range(B):
         instance_ids = list(mask_ids_batch[b])
         m = masks[b]
@@ -83,10 +83,11 @@ def get_image_sizes(input_format, input_shape, batch_size, metadata):
         input_format (str): Input format string (e.g. "TZYXC").
         input_shape (tuple): Shape of the input (no batch), matching input_format.
         batch_size (int): Number of samples in the batch.
-        metadata (list[dict]): List of metadata dicts, one per sample.
+        metadata (dict): Batch metadata; each key maps to a 1D array of
+                         length `batch_size` (e.g. "y_size", "x_size", ...).
 
     Returns:
-        list[tuple]: List of image sizes for each sample in the batch.
+        list[tuple], list[tuple]: (image_sizes, orig_image_sizes) for each sample.
     """
     if input_format == "TZYXC":
         ax_names = ('time', 'z', 'y', 'x')
@@ -101,17 +102,20 @@ def get_image_sizes(input_format, input_shape, batch_size, metadata):
 
     image_sizes = []
     for i in range(batch_size):
-        meta = metadata[i]
-        spatial_dims = [meta[f"{ax}_size"] for ax in ax_names]
+        spatial_dims = [metadata[f"{ax}_size"][i] for ax in ax_names]
         image_sizes.append(tuple(spatial_dims))
-    
-    if "orig_image_sizes" in metadata[0]:
+
+    # use orig_* sizes only if all of them are present
+    if all(f"orig_{ax}_size" in metadata for ax in ax_names):
         orig_image_sizes = []
         for i in range(batch_size):
-            meta = metadata[i]
-            spatial_dims = [meta[f"orig_{ax}_size"] for ax in ax_names]
+            spatial_dims = [metadata[f"orig_{ax}_size"][i] for ax in ax_names]
             orig_image_sizes.append(tuple(spatial_dims))
     else:
         orig_image_sizes = image_sizes
 
     return image_sizes, orig_image_sizes
+
+
+def get_clones(module, N):
+    return nn.ModuleList([copy.deepcopy(module) for i in range(N)])
