@@ -1171,14 +1171,9 @@ from cell_observatory_finetune.models.layers.utils import pack_time, unpack_time
 # Model size configurations
 # Select via model_template parameter in config YAML
 CONFIGS = {
-    'swin-unetr-tiny': {
+    'swin-unetr-small': {
         'feature_size': 24,
         'depths': (2, 2, 2, 2),
-        'num_heads': (3, 6, 12, 24),
-    },
-    'swin-unetr-small': {
-        'feature_size': 48,
-        'depths': (2, 2, 6, 2),
         'num_heads': (3, 6, 12, 24),
     },
     'swin-unetr-base': {
@@ -1224,7 +1219,6 @@ class FinetuneSwinUNETR(nn.Module):
         output_channels: Optional[int],
         model_template: Literal[
             'swin-unetr',  # custom use feature_size, depths, num_heads to config model
-            'swin-unetr-tiny',
             'swin-unetr-small',
             'swin-unetr-base',
             'swin-unetr-large',

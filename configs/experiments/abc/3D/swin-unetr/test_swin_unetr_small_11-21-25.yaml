@@ -1,0 +1,155 @@
+# @package _global_
+defaults:
+  - /tasks/boundary_segmentation
+  - /paths/abc_martin                        # configs/paths/abc_martin.yaml (ABC server paths)
+  - /clusters/local                          # configs/clusters/local.yaml (ABC cluster resources)
+  - /datasets/pretrain_dataset_ray           # configs/datasets/pretrain_dataset_ray.yaml
+  - /datasets/preprocessor/boundary_segmentation_preprocessor  # configs/datasets/preprocessor/boundary_segmentation_preprocessor.yaml
+  - /models/swin-unetr/swin_unetr_base       # configs/models/swin-unetr/swin_unetr_base.yaml
+  - /hooks/hooks_with_weight_decay           # configs/hooks/hooks_with_weight_decay.yaml
+  - /checkpoint/checkpoint                   # configs/checkpoint/checkpoint.yaml
+  - /loggers/loggers                         # configs/loggers/loggers.yaml
+  - /evaluation/base_evaluator               # configs/evaluation/base_evaluator.yaml
+  - /deepspeed/zero3                         # configs/deepspeed/zero3.yaml
+  - /optimizers/lamb                         # configs/optimizers/lamb.yaml
+  - /schedulers/test_warmup_cosine_decay     # configs/schedulers/test_warmup_cosine_decay.yaml
+  - /optimizations/optimizations             # configs/optimizations/optimizations.yaml
+  - /profiling/profiling                     # configs/profiling/profiling.yaml
+  - _self_
+
+# experiment name (used for logging)
+experiment_name: test_swin_unetr_small
+wandb_project: segmentation_case_study
+
+# task
+task: boundary_segmentation
+
+# Model type
+network: swin-unetr
+
+# engine type
+engine: deepspeed
+
+# distributed framework
+distributed_framework: ray
+
+# run type
+run_type: single_run # single_run, multi_run, or tune
+
+# job type
+job_type: train # train or test
+
+# trainer type
+trainer: training.loops.EpochBasedTrainer
+
+# benchmark loop to run for each worker
+loop_per_worker_script: training.loops.train_loop_per_worker
+
+# training quantization
+quantization: bfloat16 # data type for training, options: bfloat16, float32, float16
+
+# dtype for training data
+# NOTE: numpy doesn't support bfloat16, the preprocessor will cast data before we feed it to the model 
+dataset_dtype: float16 # data type for loading data, options: float32, float16 
+storage_dtype: uint16 # data type for storage
+
+# dataset layout in the zarr files
+dataset_layout_order: ZYXC
+
+# seed
+seed: 42
+
+# overrides
+# --------------------------------------------------------------------------------
+
+clusters:
+  batch_size: 2 # total batch size
+  worker_nodes: 1 # number of worker nodes
+  gpus_per_worker: 1 # number of gpus per worker node
+  cpus_per_gpu: 16 # number of cpu cores per gpu
+  mem_per_cpu: 16000 # ram per cpu core
+  ray_queue_memory: 0.1
+
+paths:
+  # base output directory for logs, checkpoints, etc.
+  outdir: ${paths.data_path}/tests/supervised_models/${experiment_name}
+  resume_checkpointdir: null 
+  pretrained_checkpointdir: null
+
+datasets:
+  # mainly used by other configs but determined here for ease of access
+  batch_size: ${clusters.batch_size_per_gpu} # batch size = (total_batch_size * total_gpus)
+  input_shape: [128, 128, 128, 2]  # 3D ZYXC cubes with 2 channels
+  patch_shape: [16, 16, 16, null]  # spatial patch size 16^3
+  occupancy_threshold: 0.9
+
+  split: 0.1
+  return_dataloader: true
+  distributed_sampler: true
+
+  # prefetch_factor: 1 # prefetch factor for the dataloader
+  # num_workers: 4
+
+  buffer_capacity: 20
+  num_actors_min: 4
+  num_actors_max: 12
+
+  max_hypercubes: 100
+
+  use_cached_hypercubes_dataframe: false
+  # hypercubes_dataframe_path: ${paths.server_folder_path}/databases/prepared_1_128_128_128_2_hypercube_view.csv
+
+  databases:
+    occupancy_threshold_filter_type: 'min_ch0'
+    synthetic_only: true
+    has_annotations: true
+
+# models - override to use small template
+models:
+  model_template: swin-unetr-small
+
+# schedulers
+schedulers:
+  epochs: 2 # Single epoch for integration test
+
+evaluation:
+  val_begin: 0
+  val_interval: 1
+  # used by BestMetricSaver to save best metric
+  # needs to match one of metrics saved per epoch by loss_dict
+  # in the training loop or evaluator.evaluate() in the evaluation loop
+  val_metric: val_step_loss
+  val_mode: min # mode for the validation metric, can be 'max' or 'min'
+  evaluator:
+    _target_: evaluation.base_evaluation.BaseEvaluator
+    training_metrics:
+      - "step_loss": "mean"
+
+loggers:
+  event_writers:
+      - _target_: cell_observatory_platform.training.loggers.LocalEventWriter
+        save_dir: ${loggers.logdir}
+        step_scalars_prefix: step_logbook
+        epoch_scalars_prefix: epoch_logbook
+        scalars_save_format: csv
+
+hooks:
+  hooks_list:
+  - _target_: training.hooks.WeightDecayScheduleHook
+  - _target_: training.hooks.FreeDeviceBufferHook
+  - _target_: training.hooks.AnomalyDetector
+  - _target_: training.hooks.LRScheduler
+  - _target_: training.hooks.IterationTimer
+  - _target_: training.hooks.PeriodicWriter
+  - _target_: training.hooks.PeriodicCheckpointer
+    file_prefix: latest_model
+  - _target_: training.hooks.BestCheckpointer
+    checkpointdir: ${checkpoint.checkpoint_manager.save_checkpointdir}
+  - _target_: training.hooks.TorchMemoryStats
+    step_period: 1
+    epoch_period: 1
+    logdir: ${loggers.logdir}
+  - _target_: training.hooks.BestMetricSaver
+    metric_name: ${evaluation.val_metric}
+    compare_fn: ${evaluation.val_mode}
+    eval_after_validation: true

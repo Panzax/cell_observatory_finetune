@@ -1,0 +1,21 @@
+# @package _global_
+defaults:
+  - /experiments/abc/3D/swin-unetr/test_swin_unetr_small  # Inherit from small config
+  - _self_
+
+# experiment name (used for logging)
+experiment_name: test_swin_unetr_multigpu
+wandb_project: segmentation_case_study
+
+# Override cluster config for multi-GPU
+clusters:
+  batch_size: 4 # total batch size (increased for multi-GPU)
+  worker_nodes: 1 # number of worker nodes
+  gpus_per_worker: 2 # number of gpus per worker node (multi-GPU)
+  cpus_per_gpu: 8 # number of cpu cores per gpu
+  mem_per_cpu: 16000 # ram per cpu core
+
+datasets:
+  max_hypercubes: 20 # Slightly more data for multi-GPU test
+
+
