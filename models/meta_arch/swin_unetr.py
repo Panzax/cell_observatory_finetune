@@ -1505,3 +1505,86 @@ class FinetuneSwinUNETR(nn.Module):
         predictions = self._convert_tensor_back(predictions, B, T)
         
         return predictions
+    
+    def predict_with_segmentation(
+        self,
+        data_sample: dict,
+        spot_sigma=5.0,
+        outline_sigma=1.0,
+        make_isotropic=True,
+        voxel_size=(1.0, 1.0, 1.0),
+        use_gpu=True
+    ):
+        """
+        Inference with Voronoi-Otsu segmentation post-processing.
+        
+        This performs the full pipeline:
+        1. Predict cell boundaries (binary classification)
+        2. Convert to instance labels using GPU-accelerated Voronoi-Otsu
+        
+        The Voronoi-Otsu algorithm:
+        - Applies Gaussian blur with spot_sigma to find cell centers
+        - Detects local maxima as seeds
+        - Applies Gaussian blur with outline_sigma for boundary refinement
+        - Uses Otsu thresholding to create binary mask
+        - Filters seeds to those within the mask
+        - Creates Voronoi diagram within the masked region
+        
+        Args:
+            data_sample: Dictionary with 'data_tensor' key
+            spot_sigma: Gaussian blur sigma for detecting cell centers
+                       Typical range: 2-10 (from clEsperanto guide: 5 for nuclei)
+                       Higher = larger cells, more separated
+            outline_sigma: Gaussian blur sigma for detecting boundaries  
+                          Typical range: 0-2 (from clEsperanto guide: 1 for nuclei)
+                          Higher = smoother boundaries
+            make_isotropic: Make 3D data isotropic before segmentation (recommended by clEsperanto)
+            voxel_size: Physical voxel size (z_size, y_size, x_size) in same units
+                       Used for isotropic rescaling. E.g., (2.0, 0.5, 0.5) for 
+                       z=2um, y=0.5um, x=0.5um
+            use_gpu: Whether to use GPU acceleration for segmentation
+        
+        Returns:
+            Dictionary containing:
+                - 'boundaries': Boundary predictions in framework format (TZYXC/ZYXC)
+                - 'cell_labels': Instance segmentation labels (each cell = unique ID)
+                                Shape: [B, T, Z, Y, X] or [B, Z, Y, X]
+        
+        Example:
+            >>> # For isotropic data (equal voxel spacing)
+            >>> results = model.predict_with_segmentation(data, spot_sigma=5, outline_sigma=1)
+            >>> 
+            >>> # For anisotropic data (z-spacing 2x larger than xy)
+            >>> results = model.predict_with_segmentation(
+            ...     data, 
+            ...     spot_sigma=5, 
+            ...     outline_sigma=1,
+            ...     make_isotropic=True,
+            ...     voxel_size=(2.0, 1.0, 1.0)
+            ... )
+            >>> 
+            >>> # Access results
+            >>> boundaries = results['boundaries']  # Original boundary predictions
+            >>> cell_labels = results['cell_labels']  # Integer labels per cell
+            >>> num_cells = cell_labels.max()  # Count detected cells
+        """
+        # Import here to avoid dependency at class definition time
+        from models.utils.segmentation_postprocessing import postprocess_batch
+        
+        # Get boundary predictions using existing predict method
+        boundary_predictions = self.predict(data_sample)
+        
+        # Apply Voronoi-Otsu segmentation
+        cell_labels = postprocess_batch(
+            boundary_predictions,
+            spot_sigma=spot_sigma,
+            outline_sigma=outline_sigma,
+            make_isotropic=make_isotropic,
+            voxel_size=voxel_size,
+            use_gpu=use_gpu
+        )
+        
+        return {
+            'boundaries': boundary_predictions,
+            'cell_labels': cell_labels
+        }
