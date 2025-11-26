@@ -1,34 +1,33 @@
 # @package _global_
 defaults:
-  - /tasks/channel_split
-  - /paths/coreweave                         # configs/paths/coreweave.yaml
-  - /hydra/overrides                         # configs/hydra/overrides.yaml (not working)
-  - /clusters/coreweave_h100                 # configs/clusters/coreweave_h100.yaml
-  - /datasets/pretrain_dataset_ray           # configs/datasets/pretrain_dataset.yaml
-  - /datasets/preprocessor/channel_split_preprocessor  # configs/datasets/preprocessor/channel_split_preprocessor.yaml
+  - /tasks/boundary_segmentation
+  - /paths/abc                               # configs/paths/abc.yaml
+  - /hydra/overrides                         # configs/hydra/overrides.yaml
+  - /clusters/local                          # configs/clusters/local.yaml
+  - /datasets/pretrain_dataset_ray           # configs/datasets/pretrain_dataset_ray.yaml
+  - /datasets/preprocessor/boundary_segmentation_preprocessor  # configs/datasets/preprocessor/boundary_segmentation_preprocessor.yaml
   - /datasets/masking/mask_generator         # configs/datasets/masking/mask_generator.yaml  
-  - /models/mae/large                        # configs/models/mae/large.yaml
-  - /models/decoders/vit                     # configs/models/decoders/vit.yaml
-  - /hooks/hooks_with_weight_decay           # configs/hooks/hooks.yaml
+  - /models/swin-unetr/swin_unetr_base       # configs/models/swin-unetr/swin_unetr_base.yaml
+  - /hooks/hooks                             # configs/hooks/hooks.yaml
   - /checkpoint/checkpoint                   # configs/checkpoint/checkpoint.yaml
   - /loggers/loggers                         # configs/loggers/loggers.yaml
   - /evaluation/base_evaluator               # configs/evaluation/base_evaluator.yaml
   - /deepspeed/zero2                         # configs/deepspeed/zero2.yaml
-  - /optimizers/lamb_mae                     # configs/optimizers/lamb.yaml
-  - /schedulers/warmup_cosine_decay_with_weight_decay # configs/schedulers/test_warmup_cosine_decay.yaml
+  - /optimizers/lamb                         # configs/optimizers/lamb.yaml
+  - /schedulers/test_warmup_cosine_decay     # configs/schedulers/test_warmup_cosine_decay.yaml
   - /optimizations/optimizations             # configs/optimizations/optimizations.yaml
   - /profiling/profiling                     # configs/profiling/profiling.yaml
   - _self_
 
 # experiment name (used for logging)
-experiment_name: mae_large_128x256x256_100_epoch_baseline_channel_split_lr_0p01
-wandb_project: finetuning_3d
+experiment_name: train_swin_unetr_base_boundary_segmentation
+wandb_project: segmentation_case_study
 
 # task
-task: finetune_mae
+task: boundary_segmentation
 
 # Model type
-network: mae
+network: swin-unetr
 
 # engine type
 engine: deepspeed
@@ -58,6 +57,8 @@ storage_dtype: uint16
 # dataset layout in the zarr files
 dataset_layout_order: ZYXC
 
+data_dim: 3
+
 # seed
 seed: 42
 
@@ -66,25 +67,32 @@ seed: 42
 
 # clusters
 clusters:
-  batch_size: 768 # total batch size
-  worker_nodes: 4 # number of worker nodes
-  gpus_per_worker: 8 # number of gpus per worker node
-  cpus_per_gpu: 12 # number of cpu cores per gpu
-  mem_per_cpu: 40000 # ram per cpu core
   ray_queue_memory: 0.2
+  batch_size: 16 # total batch size
+  worker_nodes: 1 # number of worker nodes
+  gpus_per_worker: 1 # number of gpus per worker node
+  cpus_per_gpu: 16 # number of cpu cores per gpu
+  mem_per_cpu: 21000 # ram per cpu core
+  scaling_config:
+    use_gpu: true
+    num_workers: ${clusters.total_gpus} # number of total workers (equals total nr. gpus normally)
+    resources_per_worker:
+      CPU: 1
+      GPU: 1
+    trainer_resources:
+      CPU: 0 
 
-#paths:
 paths:
   # base output directory for logs, checkpoints, etc.
-  outdir: ${paths.data_path}/finetuned_models/${experiment_name}
-  resume_checkpointdir: null
+  outdir: ${paths.data_path}/supervised_models/${experiment_name}
+  resume_checkpointdir: null 
   pretrained_checkpointdir: null
 
 # data
 datasets:
   # mainly used by other configs but determined here for ease of access
   batch_size: ${clusters.batch_size_per_gpu} # batch size = (total_batch_size * total_gpus)
-  input_shape: [128, 256, 256, 2]
+  input_shape: [128, 128, 128, 2] # NOTE: important that this matches database hypercube shape
   patch_shape: [16, 16, 16, null]
   occupancy_threshold: 0.9
 
@@ -92,35 +100,43 @@ datasets:
   return_dataloader: true
   distributed_sampler: true
 
-  buffer_capacity: 16
+  buffer_capacity: 20
   num_actors_min: 4
   num_actors_max: 12
 
-  max_hypercubes: 1000000
+  max_hypercubes: 100
 
-  use_cached_hypercubes_dataframe: true
-  hypercubes_dataframe_path: ${paths.server_folder_path}/databases/prepared_1_128_128_128_2_hypercube_view.csv
+  use_cached_hypercubes_dataframe: false
+  # hypercubes_dataframe_path: ${paths.server_folder_path}/databases/prepared_1_128_128_128_2_hypercube_view.csv
 
   databases:
     occupancy_threshold_filter_type: 'min_ch0'
+    synthetic_only: true
+    has_annotations: true
 
+# schedulers
 schedulers:
-  epochs: 100
-  warmup: 20
-  cooldown: 5
+  epochs: 10 # Production training epochs
 
-# ROPE axial
+# checkpoint
+checkpoint:
+  checkpoint_manager:
+    checkpoint_tag: latest_model
+
+
+# models - use base template
 models:
-  mae:
-    abs_sincos_enc: false
-    rope_pos_enc: true
-    rope_random_rotation_per_head: true
-    rope_mixed: false
-    rope_theta: 100.0
+  model_template: swin-unetr-base
 
-optimizers:
-  wd:  ${eval:'${optimizers.lr} * 0.1'}
-  lr: 1e-2
+evaluation:
+  val_begin: 0
+  val_interval: 1
+  val_metric: val_step_loss
+  val_mode: min
+  evaluator:
+    _target_: evaluation.base_evaluation.BaseEvaluator
+    training_metrics:
+      - "step_loss": "mean"
 
 # hooks
 hooks:
@@ -132,11 +148,12 @@ hooks:
   - _target_: training.hooks.IterationTimer
   - _target_: training.hooks.PeriodicWriter
   - _target_: training.hooks.PeriodicCheckpointer
+    period: 1
     file_prefix: latest_model
   - _target_: training.hooks.BestCheckpointer
     checkpointdir: ${checkpoint.checkpoint_manager.save_checkpointdir}
   - _target_: training.hooks.TorchMemoryStats
-    step_period: 1
+    step_period: 2
     epoch_period: 1
     logdir: ${loggers.logdir}
   - _target_: training.hooks.BestMetricSaver

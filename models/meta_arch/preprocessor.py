@@ -1,8 +1,12 @@
 import time
+import ujson
+from typing import Optional
 
 import torch
 
-from cell_observatory_finetune.data.utils import downsample, create_na_masks, resize_mask
+from cell_observatory_finetune.data.structures import convert_bbox_format
+from cell_observatory_finetune.training.helpers import mask_ids_to_masks, get_image_sizes
+from cell_observatory_finetune.data.utils import downsample, create_na_masks, resize_mask, instance_map_to_boundary
 
 from cell_observatory_platform.data.io import read_file
 from cell_observatory_platform.data.data_types import TORCH_DTYPES, NUMPY_DTYPES
@@ -24,6 +28,9 @@ class FinetunePreprocessor(RayPreprocessor):
                  ideal_psf_path: str | None = None,
                  na_mask_thresholds: list[float] | None = None,
                  resize_na_masks: bool = True,
+                 mask_idx: int = -1,
+                 bbox_data_format: Optional[str] = None,
+                 bbox_output_format: Optional[str] = None
     ):
         super().__init__(dtype=dtype,
                          transforms_list=transforms_list,
@@ -35,6 +42,9 @@ class FinetunePreprocessor(RayPreprocessor):
         assert input_format[-1] == 'C', "Input format must end with 'C' (channels)"
         self.input_shape = input_shape
 
+        self.bbox_data_format = bbox_data_format
+        self.bbox_output_format = bbox_output_format
+
         # increment for batch dim
         self.axis_index = {ax: i+1 for i, ax in enumerate(input_format)}
         self.channel_idx = self.axis_index.get('C', None)
@@ -42,6 +52,8 @@ class FinetunePreprocessor(RayPreprocessor):
         self.z_idx = self.axis_index.get('Z', None)
         self.y_idx = self.axis_index.get('Y', None)
         self.x_idx = self.axis_index.get('X', None)
+
+        self.mask_idx = mask_idx
 
         # spatial dim indices for FFT (must be dims, not sizes)
         # increment by 1 to account for batch dim
@@ -84,6 +96,10 @@ class FinetunePreprocessor(RayPreprocessor):
                 resize=self.resize_na_masks,
             )
 
+        if self.task == "instance_segmentation":
+            assert self.bbox_data_format is not None, "bbox_data_format must be specified for instance_segmentation task"
+            assert self.bbox_output_format is not None, "bbox_output_format must be specified for instance_segmentation task"
+
         self.patch_shape = patch_shape
         self.patch_embedding = PatchEmbedding(
             input_fmt=self.input_format,
@@ -94,10 +110,37 @@ class FinetunePreprocessor(RayPreprocessor):
             channels=self.channels,
         )
 
+    def _split_inputs_and_masks(self, inputs: torch.Tensor):
+        """
+        Split `inputs` into:
+        - inputs_wo_mask: all channels except `self.mask_idx`
+        - masks: the mask channel (instance-id label map), with channel dim removed.
+
+        Assumes channels are the *last* axis (input_format ends with 'C').
+        """
+        C = inputs.shape[-1]
+        device = inputs.device
+
+        if C < 2:
+            raise ValueError(f"Expected at least 2 channels (image + mask), got C={C}")
+
+        mask_pos = self.mask_idx if self.mask_idx >= 0 else C + self.mask_idx
+        if not (0 <= mask_pos < C):
+            raise ValueError(f"mask_idx={self.mask_idx} out of range for C={C}")
+
+        masks = inputs[..., mask_pos]
+
+        all_idx = torch.arange(C, device=device)
+        keep_idx = torch.cat([all_idx[:mask_pos], all_idx[mask_pos + 1 :]])  # (C-1,)
+
+        inputs_wo_mask = inputs.index_select(dim=-1, index=keep_idx)
+
+        return inputs_wo_mask, masks
+
     def forward(self, data_sample: dict, data_time: float) -> dict:
         preprocess_time = time.time()
 
-        inputs = data_sample['data_tensor']
+        inputs: torch.Tensor = data_sample['data_tensor']
         meta = data_sample.get('metainfo', {})
 
         if inputs.dtype != self.dtype:
@@ -140,8 +183,107 @@ class FinetunePreprocessor(RayPreprocessor):
                 inputs=inputs,
                 spatial_dims=self.spatial_dims,
             )
+            
         elif self.task == "upsample_time":
             targets = None
+        
+        elif self.task == "instance_segmentation":
+            if self.channel_idx is None:
+                raise ValueError(
+                    "Channel axis 'C' not present in input_format; "
+                    "cannot perform instance_segmentation."
+                )
+
+            inputs, masks = self._split_inputs_and_masks(inputs)
+
+            # Metadata is keyed by *channel index*, not axis index.
+            chan_idx = self.mask_idx if self.mask_idx >= 0 else self.channels + self.mask_idx
+            chan_key = str(chan_idx)
+
+            # pc_metadata_json: np.ndarray of JSON strings, shape [B]
+            pc_meta_batch = meta["pc_metadata_json"]
+
+            mask_ids_batch: list[list[int]] = []
+            bboxes_batch: list[torch.Tensor] = []
+
+            for raw in pc_meta_batch:
+                parsed = ujson.loads(raw)
+                channel_meta = parsed.get(chan_key, {}) or {}
+                instances = channel_meta.get("mask_bbox_dict", {}) or {}
+
+                ids: list[int] = []
+                boxes: list[list[float]] = []
+
+                for cell_id_str, bbox in instances.items():
+                    ids.append(int(cell_id_str))
+                    boxes.append(bbox)
+
+                mask_ids_batch.append(ids)
+
+                if boxes:
+                    bboxes_batch.append(
+                        torch.as_tensor(
+                            boxes,
+                            device=inputs.device,
+                            dtype=torch.float32,
+                        )
+                    )
+                else:
+                    bboxes_batch.append(
+                        torch.zeros((0, 6), device=inputs.device, dtype=torch.float32)
+                    )
+
+            binary_masks_batch = mask_ids_to_masks(
+                batch_size=inputs.shape[0],
+                spatial_shape=self.spatial_shape,
+                mask_ids_batch=mask_ids_batch,
+                masks=masks,
+                input_format=self.input_format,
+                input_shape=self.input_shape,
+                device=inputs.device,
+            )
+            
+            if self.bbox_data_format != self.bbox_output_format:
+                bboxes_batch = convert_bbox_format(bboxes_batch, self.bbox_data_format, self.bbox_output_format)
+
+            targets = []
+            for mask_ids, bm, boxes in zip(mask_ids_batch, binary_masks_batch, bboxes_batch):
+                targets.append(
+                    {
+                        "masks": bm,
+                        "boxes": boxes,
+                        "mask_ids": torch.as_tensor(
+                            mask_ids, device=inputs.device, dtype=torch.long
+                        ),
+                        "labels": torch.zeros(len(mask_ids), device=inputs.device, dtype=torch.long)
+                    }
+                )
+
+            image_sizes, orig_image_sizes = get_image_sizes(
+                input_format=self.input_format,
+                input_shape=self.input_shape,
+                batch_size=inputs.shape[0],
+                metadata=meta,
+            )
+            meta["image_sizes"] = image_sizes
+            meta["orig_image_sizes"] = orig_image_sizes
+
+        elif self.task == "boundary_segmentation":
+            if self.channel_idx is None:
+                raise ValueError("Channel axis 'C' not present in input_format; cannot boundary segmentation.")
+            # Masks are stored in the last N+1 channel
+            # Slice out the masks and the inputs depending on the channel axis position
+            inputs, masks = self._split_inputs_and_masks(inputs)
+            boundary_masks = instance_map_to_boundary(masks, boundary_width=2)
+            targets = boundary_masks # [B, *spatial]
+            image_sizes, orig_image_sizes = get_image_sizes(
+                input_format=self.input_format,
+                input_shape=self.input_shape,
+                batch_size=inputs.shape[0],
+                metadata=meta
+            )
+            meta['image_sizes'] = image_sizes
+            meta['orig_image_sizes'] = orig_image_sizes
         else:
             raise ValueError(f"Unknown task: {self.task}")
 

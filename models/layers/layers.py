@@ -12,6 +12,21 @@ import torch.nn.functional as F
 from cell_observatory_platform.models.patch_embeddings import calc_num_patches
 
 
+class LayerNorm3D(nn.Module):
+    def __init__(self, normalized_shape, norm_layer=nn.LayerNorm):
+        super().__init__()
+        self.ln = norm_layer(normalized_shape) if norm_layer is not None else nn.Identity()
+
+    def forward(self, x):
+        """
+        x: N C D H W
+        """
+        x = x.permute(0, 2, 3, 4, 1)
+        x = self.ln(x)
+        x = x.permute(0, 4, 1, 2, 3)
+        return x
+
+
 class MLP(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim, num_layers):
         super().__init__()
@@ -24,6 +39,19 @@ class MLP(nn.Module):
             x = F.relu(layer(x)) if i < self.num_layers - 1 else layer(x)
         return x
 
+class SwiGLU(nn.Module):
+    # Adapted from: https://github.com/FadiZidiDz/LoLA-SpecViT-Model/blob/main/improved_GCPE.py
+    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int):
+        super().__init__()
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.fc2 = nn.Linear(input_dim, hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, output_dim)
+
+    def forward(self, x):
+        # SwiGLU is
+        # Linear3(Swish(Linear1(x)) * Linear2(X))
+        # Where Swish(x) = x * sigmoid(x)
+        return self.fc3(F.silu(self.fc1(x)) * self.fc2(x))
 
 def inverse_sigmoid(x, eps=1e-5):
     x = x.clamp(min=0, max=1)

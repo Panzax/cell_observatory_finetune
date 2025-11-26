@@ -2,7 +2,7 @@
 _target_: cell_observatory_finetune.models.meta_arch.swin_unetr.FinetuneSwinUNETR
 
 # These reference variables from the experiment config (pulled in dynamically)
-input_fmt: ${dataset_layout_order}         # I think this should be TZYXC
+input_fmt: ${dataset_layout_order} # TODO: Confirm ZYXC
 input_shape: ${datasets.input_shape}       
 patch_shape: ${datasets.patch_shape}        
 
@@ -32,4 +32,4 @@ downsample: merging                         # Downsampling strategy (merging or 
 use_v2: false                               # Use SwinUNETR v2 with residual conv blocks
 
 # Loss function for training
-loss_fn: l2_masked
+loss_fn: generalized_dice

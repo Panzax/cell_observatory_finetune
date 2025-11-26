@@ -30,6 +30,8 @@ from monai.networks.blocks import PatchEmbed, UnetOutBlock, UnetrBasicBlock, Une
 from monai.networks.layers import DropPath, trunc_normal_
 from monai.utils import ensure_tuple_rep, look_up_option, optional_import
 
+from ..layers.layers import SwiGLU
+
 rearrange, _ = optional_import("einops", name="rearrange")
 
 __all__ = [
@@ -45,7 +47,6 @@ __all__ = [
     "BasicLayer",
     "SwinTransformer",
 ]
-
 
 class SwinUNETR(nn.Module):
     """
@@ -64,6 +65,7 @@ class SwinUNETR(nn.Module):
         window_size: Sequence[int] | int = 7,
         qkv_bias: bool = True,
         mlp_ratio: float = 4.0,
+        mlp_type: str = "Mlp",
         feature_size: int = 24,
         norm_name: tuple | str = "instance",
         drop_rate: float = 0.0,
@@ -147,6 +149,7 @@ class SwinUNETR(nn.Module):
             depths=depths,
             num_heads=num_heads,
             mlp_ratio=mlp_ratio,
+            mlp_type=mlp_type,
             qkv_bias=qkv_bias,
             drop_rate=drop_rate,
             attn_drop_rate=attn_drop_rate,
@@ -552,6 +555,7 @@ class SwinTransformerBlock(nn.Module):
         window_size: Sequence[int],
         shift_size: Sequence[int],
         mlp_ratio: float = 4.0,
+        mlp_type: str = "Mlp",
         qkv_bias: bool = True,
         drop: float = 0.0,
         attn_drop: float = 0.0,
@@ -596,7 +600,18 @@ class SwinTransformerBlock(nn.Module):
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = Mlp(hidden_size=dim, mlp_dim=mlp_hidden_dim, act=act_layer, dropout_rate=drop, dropout_mode="swin")
+        if mlp_type == "Mlp":
+            self.mlp = Mlp(hidden_size=dim, mlp_dim=mlp_hidden_dim, act=act_layer, dropout_rate=drop, dropout_mode="swin")
+        elif mlp_type == "SwiGLU":
+            if drop > 0.0:
+                raise ValueError("Dropout is not supported for SwiGLU")
+            self.mlp = SwiGLU(
+                input_dim=dim, 
+                hidden_dim=mlp_hidden_dim, 
+                output_dim=dim
+            )
+        else:
+            raise ValueError(f"Invalid MLP type: {mlp_type}")
 
     def forward_part1(self, x, mask_matrix):
         x_shape = x.size()
@@ -837,6 +852,7 @@ class BasicLayer(nn.Module):
         window_size: Sequence[int],
         drop_path: list,
         mlp_ratio: float = 4.0,
+        mlp_type: str = "Mlp",
         qkv_bias: bool = False,
         drop: float = 0.0,
         attn_drop: float = 0.0,
@@ -874,6 +890,7 @@ class BasicLayer(nn.Module):
                     window_size=self.window_size,
                     shift_size=self.no_shift if (i % 2 == 0) else self.shift_size,
                     mlp_ratio=mlp_ratio,
+                    mlp_type=mlp_type,
                     qkv_bias=qkv_bias,
                     drop=drop,
                     attn_drop=attn_drop,
@@ -938,6 +955,7 @@ class SwinTransformer(nn.Module):
         depths: Sequence[int],
         num_heads: Sequence[int],
         mlp_ratio: float = 4.0,
+        mlp_type: str = "Mlp",
         qkv_bias: bool = True,
         drop_rate: float = 0.0,
         attn_drop_rate: float = 0.0,
@@ -1006,6 +1024,7 @@ class SwinTransformer(nn.Module):
                 window_size=self.window_size,
                 drop_path=dpr[sum(depths[:i_layer]) : sum(depths[: i_layer + 1])],
                 mlp_ratio=mlp_ratio,
+                mlp_type=mlp_type,
                 qkv_bias=qkv_bias,
                 drop=drop_rate,
                 attn_drop=attn_drop_rate,
@@ -1145,21 +1164,16 @@ def filter_swinunetr(key, value):
 ##############################################################
 
 from typing import Literal, Optional
-from cell_observatory_finetune.training.losses import get_loss_fn
+from monai.losses import GeneralizedDiceLoss
 from cell_observatory_platform.models.patch_embeddings import calc_num_patches
 from cell_observatory_finetune.models.layers.utils import pack_time, unpack_time
 
 # Model size configurations
 # Select via model_template parameter in config YAML
 CONFIGS = {
-    'swin-unetr-tiny': {
+    'swin-unetr-small': {
         'feature_size': 24,
         'depths': (2, 2, 2, 2),
-        'num_heads': (3, 6, 12, 24),
-    },
-    'swin-unetr-small': {
-        'feature_size': 48,
-        'depths': (2, 2, 6, 2),
         'num_heads': (3, 6, 12, 24),
     },
     'swin-unetr-base': {
@@ -1200,11 +1214,11 @@ class FinetuneSwinUNETR(nn.Module):
         task: Literal['channel_split', 
                       'upsample_time', 
                       'upsample_space', 
-                      'upsample_spacetime'],
+                      'upsample_spacetime',
+                      'boundary_segmentation'],
         output_channels: Optional[int],
         model_template: Literal[
             'swin-unetr',  # custom use feature_size, depths, num_heads to config model
-            'swin-unetr-tiny',
             'swin-unetr-small',
             'swin-unetr-base',
             'swin-unetr-large',
@@ -1218,6 +1232,7 @@ class FinetuneSwinUNETR(nn.Module):
         window_size: Sequence[int] | int = 7,
         qkv_bias: bool = True,
         mlp_ratio: float = 4.0,
+        mlp_type: str = "Mlp",
         norm_name: tuple | str = "instance",
         drop_rate: float = 0.0,
         attn_drop_rate: float = 0.0,
@@ -1229,7 +1244,7 @@ class FinetuneSwinUNETR(nn.Module):
         spatial_dims: int = 3,
         downsample: str = "merging",
         use_v2: bool = False,
-        loss_fn: str = 'l2_masked'
+        loss_fn: str = 'generalized_dice'
     ):
         """
         Args:
@@ -1275,6 +1290,8 @@ class FinetuneSwinUNETR(nn.Module):
         
         # ========== Data Format Configuration ==========
         # Store format info (e.g., 'TZYXC' or 'ZYXC')
+        if input_fmt not in ["TZYXC", "ZYXC"]:
+            raise ValueError(f"Unsupported input format. Expected 'TZYXC' or 'ZYXC' but got {input_fmt}")
         self.input_fmt = input_fmt
         self.input_shape = input_shape
         self.patch_shape = patch_shape
@@ -1288,19 +1305,17 @@ class FinetuneSwinUNETR(nn.Module):
         self.output_channels = output_channels
         self.normalize = normalize
         self.spatial_dims = spatial_dims
-        
+    
         # Determine output channels for the model
-        if self.task == "channel_split":
-            model_out_channels = self.output_channels
-        elif self.task in ["upsample_space", "upsample_time", "upsample_spacetime"]:
-            model_out_channels = self.in_chans
+        if self.task == "boundary_segmentation":
+            # For semantic segmentation: use output_channels = 1 for binary segmentation
+            if self.output_channels is not None:
+                raise ValueError(f"For semantic segmentation, output_channels must be 1 but got {self.output_channels}")
+            self.output_channels = 1
         else:
             raise ValueError(f"Unknown task: {self.task}")
         
-        # NOTE: SwinUNETR expects input in format [B, C, spatial_dims...]
-        # Framework uses flexible format (TZYXC, ZYXC, etc.)
-        # We'll need to handle tensor reshaping/transposition
-        
+       
         # Determine spatial patch size (skip time dimension if present)
         if 'T' in self.input_fmt:
             # patch_shape is [T_patch, Z_patch, Y_patch, X_patch]
@@ -1316,7 +1331,7 @@ class FinetuneSwinUNETR(nn.Module):
         # Instantiate the base SwinUNETR model
         self.swin_unetr = SwinUNETR(
             in_channels=self.in_chans,
-            out_channels=model_out_channels,
+            out_channels=self.output_channels,
             patch_size=spatial_patch_size,  # Use spatial patch dimension
             feature_size=self.feature_size,
             depths=self.depths,
@@ -1324,6 +1339,7 @@ class FinetuneSwinUNETR(nn.Module):
             window_size=window_size,
             qkv_bias=qkv_bias,
             mlp_ratio=mlp_ratio,
+            mlp_type=mlp_type,
             norm_name=norm_name,
             drop_rate=drop_rate,
             attn_drop_rate=attn_drop_rate,
@@ -1338,7 +1354,12 @@ class FinetuneSwinUNETR(nn.Module):
         )
         
         # Setup loss function
-        self.loss_fn = get_loss_fn(loss_fn)
+        if self.task == "boundary_segmentation":
+            if loss_fn != "generalized_dice":
+                raise ValueError(f"For boundary segmentation, loss_fn must be 'generalized_dice' but got {loss_fn}")
+            self.loss_fn = GeneralizedDiceLoss(sigmoid=True)
+        else:
+            raise ValueError(f"Unknown task: {self.task}")
     
     def _convert_tensor_format(self, x):
         """
@@ -1433,9 +1454,9 @@ class FinetuneSwinUNETR(nn.Module):
         
         Flow:
         1. Extract data from framework dict
-        2. Convert TZYXC -> BCZYX (and merge B*T for 4D)
+        2. Convert BTZYXC -> (B*T)CZYX or BZYXC -> BCZYX
         3. Run through SwinUNETR
-        4. Convert BCZYX -> TZYXC (and split B*T for 4D)
+        4. Convert (B*T)CZYX -> BTZYXC or BCZYX -> BZYXC
         5. Compute loss in framework format
         6. Return (loss_dict, predictions) as framework expects
         
@@ -1450,32 +1471,33 @@ class FinetuneSwinUNETR(nn.Module):
                 - predictions: Tensor in framework format (TZYXC/ZYXC)
         """
         inputs, meta = data_sample['data_tensor'], data_sample['metainfo']
-        targets = meta.get('targets', [None])[0]
-        masks = meta.get("masks", [None])[0]
+        targets = meta["targets"][0] # BZYX or BTZYX
         
         # Convert input tensor format and track original dimensions
-        inputs_converted, B, T = self._convert_tensor_format(inputs)
+        inputs_converted, B, T = self._convert_tensor_format(inputs) # (B*T)CZYX or BCZYX
         
         # Forward through SwinUNETR
         predictions = self.swin_unetr(inputs_converted)
         
-        # Convert predictions back to framework format
-        predictions = self._convert_tensor_back(predictions, B, T)
-        
-        # Compute task-specific loss
-        if self.task == "channel_split":
-            loss = self.loss_fn(predictions, targets, num_patches=self.get_num_patches())
-        elif self.task == "upsample_space":
-            loss = self.loss_fn(predictions, targets, num_patches=self.get_num_patches())
-        elif self.task == "upsample_time":
-            # For time upsampling, only supervise masked timepoints
-            # This would need additional logic similar to MAE
-            raise NotImplementedError("upsample_time task not yet implemented for SwinUNETR")
-        elif self.task == "upsample_spacetime":
-            # For spacetime upsampling
-            raise NotImplementedError("upsample_spacetime task not yet implemented for SwinUNETR")
+        # Compute task-specific loss (before converting back to framework format)
+        if self.task == "boundary_segmentation":
+            # Convert targets (masks) from BZYX/BTZYX to [B, C, Z, Y, X] format to match predictions
+            # Note: We keep the channel dimension (even if C=1) because MONAI's GeneralizedDiceLoss
+            # expects [B, C, ...] format. Both predictions and targets should have the same shape.
+            if T is not None:
+                # 4D data: targets are [B, T, Z, Y, X] -> need [B*T, C, Z, Y, X]
+                # Reshape to merge batch and time dimensions
+                targets = targets.reshape(B * T, *targets.shape[2:])  # [B*T, Z, Y, X]
+            # Add channel dimension: [B, Z, Y, X] or [B*T, Z, Y, X] -> [B, 1, Z, Y, X] or [B*T, 1, Z, Y, X]
+            targets = targets.unsqueeze(1)  # Add channel dimension at position 1 to match predictions
+            
+            # Both predictions and targets are now in [B, C, Z, Y, X] format (C=1 for binary segmentation)
+            loss = self.loss_fn(predictions, targets)
         else:
             raise ValueError(f"Unknown task: {self.task}")
+        
+        # Convert predictions back to framework format for return
+        predictions = self._convert_tensor_back(predictions, B, T)
         
         loss_dict = {"step_loss": loss}
         return loss_dict, predictions
