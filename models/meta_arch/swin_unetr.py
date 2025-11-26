@@ -30,7 +30,7 @@ from monai.networks.blocks import PatchEmbed, UnetOutBlock, UnetrBasicBlock, Une
 from monai.networks.layers import DropPath, trunc_normal_
 from monai.utils import ensure_tuple_rep, look_up_option, optional_import
 
-from ..layers.layers import SwiGLU
+from ..layers.layers import SwiGLU, MLPReLUSquaredBlock
 
 rearrange, _ = optional_import("einops", name="rearrange")
 
@@ -66,6 +66,7 @@ class SwinUNETR(nn.Module):
         qkv_bias: bool = True,
         mlp_ratio: float = 4.0,
         mlp_type: str = "Mlp",
+        act_layer: str = "GELU",
         feature_size: int = 24,
         norm_name: tuple | str = "instance",
         drop_rate: float = 0.0,
@@ -90,6 +91,8 @@ class SwinUNETR(nn.Module):
             window_size: local window size.
             qkv_bias: add a learnable bias to query, key, value.
             mlp_ratio: ratio of mlp hidden dim to embedding dim.
+            mlp_type: type of MLP layer ("Mlp" or "SwiGLU").
+            act_layer: activation function for MLP ("GELU", "ReLUSquared", etc.).
             norm_name: feature normalization type and arguments.
             drop_rate: dropout rate.
             attn_drop_rate: attention dropout rate.
@@ -150,6 +153,7 @@ class SwinUNETR(nn.Module):
             num_heads=num_heads,
             mlp_ratio=mlp_ratio,
             mlp_type=mlp_type,
+            act_layer=act_layer,
             qkv_bias=qkv_bias,
             drop_rate=drop_rate,
             attn_drop_rate=attn_drop_rate,
@@ -601,7 +605,24 @@ class SwinTransformerBlock(nn.Module):
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
         if mlp_type == "Mlp":
-            self.mlp = Mlp(hidden_size=dim, mlp_dim=mlp_hidden_dim, act=act_layer, dropout_rate=drop, dropout_mode="swin")
+            # Handle ReLUSquared specially since MONAI's Mlp may not support it
+            if act_layer == "ReLUSquared":
+                # Use custom MLPReLUSquaredBlock that matches MONAI's MLPBlock structure
+                self.mlp = MLPReLUSquaredBlock(
+                    hidden_size=dim,
+                    mlp_dim=mlp_hidden_dim,
+                    dropout_rate=drop,
+                    dropout_mode="swin"
+                )
+            else:
+                # Use MONAI's Mlp for standard activations
+                self.mlp = Mlp(
+                    hidden_size=dim, 
+                    mlp_dim=mlp_hidden_dim, 
+                    act=act_layer, 
+                    dropout_rate=drop, 
+                    dropout_mode="swin"
+                )
         elif mlp_type == "SwiGLU":
             if drop > 0.0:
                 raise ValueError("Dropout is not supported for SwiGLU")
@@ -853,6 +874,7 @@ class BasicLayer(nn.Module):
         drop_path: list,
         mlp_ratio: float = 4.0,
         mlp_type: str = "Mlp",
+        act_layer: str = "GELU",
         qkv_bias: bool = False,
         drop: float = 0.0,
         attn_drop: float = 0.0,
@@ -868,6 +890,8 @@ class BasicLayer(nn.Module):
             window_size: local window size.
             drop_path: stochastic depth rate.
             mlp_ratio: ratio of mlp hidden dim to embedding dim.
+            mlp_type: type of MLP layer ("Mlp" or "SwiGLU").
+            act_layer: activation function for MLP ("GELU", "ReLUSquared", etc.).
             qkv_bias: add a learnable bias to query, key, value.
             drop: dropout rate.
             attn_drop: attention dropout rate.
@@ -891,6 +915,7 @@ class BasicLayer(nn.Module):
                     shift_size=self.no_shift if (i % 2 == 0) else self.shift_size,
                     mlp_ratio=mlp_ratio,
                     mlp_type=mlp_type,
+                    act_layer=act_layer,
                     qkv_bias=qkv_bias,
                     drop=drop,
                     attn_drop=attn_drop,
@@ -956,6 +981,7 @@ class SwinTransformer(nn.Module):
         num_heads: Sequence[int],
         mlp_ratio: float = 4.0,
         mlp_type: str = "Mlp",
+        act_layer: str = "GELU",
         qkv_bias: bool = True,
         drop_rate: float = 0.0,
         attn_drop_rate: float = 0.0,
@@ -976,6 +1002,8 @@ class SwinTransformer(nn.Module):
             depths: number of layers in each stage.
             num_heads: number of attention heads.
             mlp_ratio: ratio of mlp hidden dim to embedding dim.
+            mlp_type: type of MLP layer ("Mlp" or "SwiGLU").
+            act_layer: activation function for MLP ("GELU", "ReLUSquared", etc.).
             qkv_bias: add a learnable bias to query, key, value.
             drop_rate: dropout rate.
             attn_drop_rate: attention dropout rate.
@@ -1025,6 +1053,7 @@ class SwinTransformer(nn.Module):
                 drop_path=dpr[sum(depths[:i_layer]) : sum(depths[: i_layer + 1])],
                 mlp_ratio=mlp_ratio,
                 mlp_type=mlp_type,
+                act_layer=act_layer,
                 qkv_bias=qkv_bias,
                 drop=drop_rate,
                 attn_drop=attn_drop_rate,
@@ -1233,6 +1262,7 @@ class FinetuneSwinUNETR(nn.Module):
         qkv_bias: bool = True,
         mlp_ratio: float = 4.0,
         mlp_type: str = "Mlp",
+        act_layer: str = "GELU",
         norm_name: tuple | str = "instance",
         drop_rate: float = 0.0,
         attn_drop_rate: float = 0.0,
@@ -1262,6 +1292,8 @@ class FinetuneSwinUNETR(nn.Module):
             window_size: Local window size
             qkv_bias: Add learnable bias to query, key, value
             mlp_ratio: Ratio of mlp hidden dim to embedding dim
+            mlp_type: Type of MLP layer ("Mlp" or "SwiGLU")
+            act_layer: Activation function for MLP ("GELU", "ReLUSquared", etc.)
             norm_name: Feature normalization type
             drop_rate: Dropout rate
             attn_drop_rate: Attention dropout rate
@@ -1340,6 +1372,7 @@ class FinetuneSwinUNETR(nn.Module):
             qkv_bias=qkv_bias,
             mlp_ratio=mlp_ratio,
             mlp_type=mlp_type,
+            act_layer=act_layer,
             norm_name=norm_name,
             drop_rate=drop_rate,
             attn_drop_rate=attn_drop_rate,

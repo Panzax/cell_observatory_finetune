@@ -343,3 +343,244 @@ def test_output_channels_validation_boundary_segmentation():
             patch_shape=(2, 2, 2),
         )
 
+
+# ==================== ReLUSquared Activation Tests ====================
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is required for this test")
+def test_relusquared_activation_integration():
+    """Test ReLUSquared activation integration with boundary segmentation task."""
+    device = "cuda"
+    torch.manual_seed(0)
+    
+    B, Z, Y, X, C = 2, 128, 128, 128, 2
+    model = FinetuneSwinUNETR(
+        decoder_args={},
+        decoder="vit",
+        task="boundary_segmentation",
+        output_channels=None,
+        model_template="swin-unetr-small",
+        input_fmt="ZYXC",
+        input_shape=(Z, Y, X, C),
+        patch_shape=(2, 2, 2),
+        feature_size=24,
+        depths=(2, 2, 2, 2),
+        num_heads=(3, 6, 12, 24),
+        window_size=7,
+        spatial_dims=3,
+        act_layer="ReLUSquared",
+        mlp_type="Mlp",
+    ).to(device)
+    model.train()
+    
+    # Create input: [B, Z, Y, X, C]
+    inputs = torch.randn(B, Z, Y, X, C, dtype=torch.float32, device=device)
+    
+    # Create instance map and convert to boundary mask
+    instance_map = _create_instance_map(B, Z, Y, X, device=device)
+    boundary_masks = instance_map_to_boundary(instance_map.float(), boundary_width=2)
+    
+    data_sample = {
+        "data_tensor": inputs,
+        "metainfo": {
+            "targets": [boundary_masks],
+            "masks": [None],
+        },
+    }
+    
+    loss_dict, predictions = model.forward(data_sample)
+    
+    # Verify loss is computed correctly
+    assert "step_loss" in loss_dict
+    assert torch.is_tensor(loss_dict["step_loss"])
+    assert loss_dict["step_loss"].ndim == 0
+    assert torch.isfinite(loss_dict["step_loss"]), "Loss is NaN/Inf"
+    assert loss_dict["step_loss"].item() > 0, "Loss should be positive"
+    
+    # Verify predictions shape
+    assert predictions.shape == (B, Z, Y, X, 1)
+    assert torch.isfinite(predictions).all(), "Predictions contain NaN/Inf"
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is required for this test")
+def test_relusquared_4d_integration():
+    """Test ReLUSquared activation with 4D data integration."""
+    device = "cuda"
+    torch.manual_seed(0)
+    
+    B, T, Z, Y, X, C = 2, 4, 128, 128, 128, 2
+    model = FinetuneSwinUNETR(
+        decoder_args={},
+        decoder="vit",
+        task="boundary_segmentation",
+        output_channels=None,
+        model_template="swin-unetr-small",
+        input_fmt="TZYXC",
+        input_shape=(T, Z, Y, X, C),
+        patch_shape=(1, 2, 2, 2),
+        feature_size=24,
+        depths=(2, 2, 2, 2),
+        num_heads=(3, 6, 12, 24),
+        window_size=7,
+        spatial_dims=3,
+        act_layer="ReLUSquared",
+        mlp_type="Mlp",
+    ).to(device)
+    model.train()
+    
+    # Create input: [B, T, Z, Y, X, C]
+    inputs = torch.randn(B, T, Z, Y, X, C, dtype=torch.float32, device=device)
+    
+    # Create instance map and convert to boundary mask
+    instance_map = _create_instance_map(B, T, Z, Y, X, device=device)
+    instance_map_reshaped = instance_map.view(B * T, Z, Y, X)
+    boundary_masks_reshaped = instance_map_to_boundary(instance_map_reshaped.float(), boundary_width=2)
+    boundary_masks = boundary_masks_reshaped.view(B, T, Z, Y, X)
+    
+    data_sample = {
+        "data_tensor": inputs,
+        "metainfo": {
+            "targets": [boundary_masks],
+            "masks": [None],
+        },
+    }
+    
+    loss_dict, predictions = model.forward(data_sample)
+    
+    # Verify loss
+    assert "step_loss" in loss_dict
+    assert torch.isfinite(loss_dict["step_loss"])
+    assert loss_dict["step_loss"].item() > 0
+    
+    # Verify predictions shape: [B, T, Z, Y, X, 1]
+    assert predictions.shape == (B, T, Z, Y, X, 1)
+    assert torch.isfinite(predictions).all()
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is required for this test")
+def test_relusquared_mlp_block_structure():
+    """Test that MLPReLUSquaredBlock has correct structure matching MONAI's MLPBlock."""
+    device = "cuda"
+    
+    from cell_observatory_finetune.models.layers.layers import MLPReLUSquaredBlock
+    
+    model = FinetuneSwinUNETR(
+        decoder_args={},
+        decoder="vit",
+        task="boundary_segmentation",
+        output_channels=None,
+        model_template="swin-unetr-small",
+        input_fmt="ZYXC",
+        input_shape=(128, 128, 128, 2),
+        patch_shape=(2, 2, 2),
+        feature_size=24,
+        depths=(2, 2, 2, 2),
+        num_heads=(3, 6, 12, 24),
+        window_size=7,
+        spatial_dims=3,
+        act_layer="ReLUSquared",
+        mlp_type="Mlp",
+    ).to(device)
+    
+    # Find MLPReLUSquaredBlock instances in the model
+    relusquared_blocks = []
+    for name, module in model.named_modules():
+        if isinstance(module, MLPReLUSquaredBlock):
+            relusquared_blocks.append((name, module))
+    
+    assert len(relusquared_blocks) > 0, "Should have at least one MLPReLUSquaredBlock"
+    
+    # Verify structure matches MONAI's MLPBlock
+    for name, block in relusquared_blocks:
+        # Check required components
+        assert hasattr(block, 'linear1'), f"{name} should have linear1"
+        assert hasattr(block, 'linear2'), f"{name} should have linear2"
+        assert hasattr(block, 'fn'), f"{name} should have fn (activation)"
+        assert hasattr(block, 'drop1'), f"{name} should have drop1"
+        assert hasattr(block, 'drop2'), f"{name} should have drop2"
+        
+        # For "swin" mode, drop1 and drop2 should be the same instance
+        assert block.drop1 is block.drop2, f"{name} drop1 and drop2 should be same instance for 'swin' mode"
+        
+        # Verify activation is ReLUSquared
+        from cell_observatory_finetune.models.layers.layers import ReLUSquared
+        assert isinstance(block.fn, ReLUSquared), f"{name} activation should be ReLUSquared"
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is required for this test")
+def test_relusquared_vs_gelu_loss_comparison():
+    """Test that ReLUSquared and GELU produce different losses with same inputs."""
+    device = "cuda"
+    torch.manual_seed(0)
+    
+    B, Z, Y, X, C = 2, 128, 128, 128, 2
+    
+    # Create models with different activations
+    model_gelu = FinetuneSwinUNETR(
+        decoder_args={},
+        decoder="vit",
+        task="boundary_segmentation",
+        output_channels=None,
+        model_template="swin-unetr-small",
+        input_fmt="ZYXC",
+        input_shape=(Z, Y, X, C),
+        patch_shape=(2, 2, 2),
+        feature_size=24,
+        depths=(2, 2, 2, 2),
+        num_heads=(3, 6, 12, 24),
+        window_size=7,
+        spatial_dims=3,
+        act_layer="GELU",
+        mlp_type="Mlp",
+    ).to(device)
+    
+    model_relusquared = FinetuneSwinUNETR(
+        decoder_args={},
+        decoder="vit",
+        task="boundary_segmentation",
+        output_channels=None,
+        model_template="swin-unetr-small",
+        input_fmt="ZYXC",
+        input_shape=(Z, Y, X, C),
+        patch_shape=(2, 2, 2),
+        feature_size=24,
+        depths=(2, 2, 2, 2),
+        num_heads=(3, 6, 12, 24),
+        window_size=7,
+        spatial_dims=3,
+        act_layer="ReLUSquared",
+        mlp_type="Mlp",
+    ).to(device)
+    
+    # Initialize with same weights
+    model_relusquared.load_state_dict(model_gelu.state_dict())
+    
+    model_gelu.train()
+    model_relusquared.train()
+    
+    # Create same input and targets
+    inputs = torch.randn(B, Z, Y, X, C, dtype=torch.float32, device=device)
+    instance_map = _create_instance_map(B, Z, Y, X, device=device)
+    boundary_masks = instance_map_to_boundary(instance_map.float(), boundary_width=2)
+    
+    data_sample = {
+        "data_tensor": inputs,
+        "metainfo": {
+            "targets": [boundary_masks],
+            "masks": [None],
+        },
+    }
+    
+    loss_dict_gelu, predictions_gelu = model_gelu.forward(data_sample)
+    loss_dict_relusquared, predictions_relusquared = model_relusquared.forward(data_sample)
+    
+    # Verify losses are different (due to different activations)
+    assert not torch.allclose(
+        loss_dict_gelu["step_loss"], 
+        loss_dict_relusquared["step_loss"], 
+        atol=1e-6
+    ), "ReLUSquared and GELU should produce different losses"
+    
+    # Verify predictions are different
+    assert not torch.allclose(predictions_gelu, predictions_relusquared, atol=1e-6), \
+        "ReLUSquared and GELU should produce different predictions"
+

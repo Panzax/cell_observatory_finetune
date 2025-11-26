@@ -440,3 +440,264 @@ def test_swin_unetr_output_channels_validation():
             patch_shape=(2, 2, 2),
         )
 
+
+# ==================== ReLUSquared Activation Tests ====================
+
+@pytest.mark.parametrize("act_layer", ["GELU", "ReLUSquared"])
+def test_swin_unetr_activation_layers(act_layer):
+    """Test that different activation layers work correctly."""
+    device = "cuda" if CUDA_AVAILABLE else "cpu"
+    torch.manual_seed(0)
+    
+    B, Z, Y, X, C = 1, 128, 128, 128, 2
+    model = FinetuneSwinUNETR(
+        decoder_args={},
+        decoder="vit",
+        task="boundary_segmentation",
+        output_channels=None,
+        model_template="swin-unetr-small",
+        input_fmt="ZYXC",
+        input_shape=(Z, Y, X, C),
+        patch_shape=(2, 2, 2),
+        feature_size=24,
+        depths=(2, 2, 2, 2),
+        num_heads=(3, 6, 12, 24),
+        window_size=7,
+        spatial_dims=3,
+        act_layer=act_layer,
+        mlp_type="Mlp",
+    ).to(device)
+    model.eval()
+    
+    inputs = torch.randn(B, Z, Y, X, C, dtype=torch.float32, device=device)
+    targets = torch.randint(0, 2, (B, Z, Y, X), dtype=torch.float32, device=device)
+    
+    data_sample = {
+        "data_tensor": inputs,
+        "metainfo": {
+            "targets": [targets],
+            "masks": [None],
+        },
+    }
+    
+    with torch.no_grad():
+        loss_dict, predictions = model.forward(data_sample)
+    
+    # Verify outputs are valid
+    assert predictions.shape == (B, Z, Y, X, 1)
+    assert torch.isfinite(predictions).all()
+    assert torch.isfinite(loss_dict["step_loss"])
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is required for this test")
+def test_swin_unetr_relusquared_vs_gelu_different_outputs():
+    """Test that ReLUSquared produces different outputs than GELU."""
+    device = "cuda"
+    torch.manual_seed(0)
+    
+    B, Z, Y, X, C = 1, 128, 128, 128, 2
+    
+    # Create models with different activations
+    model_gelu = FinetuneSwinUNETR(
+        decoder_args={},
+        decoder="vit",
+        task="boundary_segmentation",
+        output_channels=None,
+        model_template="swin-unetr-small",
+        input_fmt="ZYXC",
+        input_shape=(Z, Y, X, C),
+        patch_shape=(2, 2, 2),
+        feature_size=24,
+        depths=(2, 2, 2, 2),
+        num_heads=(3, 6, 12, 24),
+        window_size=7,
+        spatial_dims=3,
+        act_layer="GELU",
+        mlp_type="Mlp",
+    ).to(device)
+    
+    model_relusquared = FinetuneSwinUNETR(
+        decoder_args={},
+        decoder="vit",
+        task="boundary_segmentation",
+        output_channels=None,
+        model_template="swin-unetr-small",
+        input_fmt="ZYXC",
+        input_shape=(Z, Y, X, C),
+        patch_shape=(2, 2, 2),
+        feature_size=24,
+        depths=(2, 2, 2, 2),
+        num_heads=(3, 6, 12, 24),
+        window_size=7,
+        spatial_dims=3,
+        act_layer="ReLUSquared",
+        mlp_type="Mlp",
+    ).to(device)
+    
+    # Initialize with same weights
+    model_relusquared.load_state_dict(model_gelu.state_dict())
+    
+    model_gelu.eval()
+    model_relusquared.eval()
+    
+    inputs = torch.randn(B, Z, Y, X, C, dtype=torch.float32, device=device)
+    targets = torch.randint(0, 2, (B, Z, Y, X), dtype=torch.float32, device=device)
+    
+    data_sample = {
+        "data_tensor": inputs,
+        "metainfo": {
+            "targets": [targets],
+            "masks": [None],
+        },
+    }
+    
+    with torch.no_grad():
+        _, predictions_gelu = model_gelu.forward(data_sample)
+        _, predictions_relusquared = model_relusquared.forward(data_sample)
+    
+    # Verify outputs are different (due to different activations)
+    assert not torch.allclose(predictions_gelu, predictions_relusquared, atol=1e-6), \
+        "ReLUSquared and GELU should produce different outputs"
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is required for this test")
+def test_swin_unetr_relusquared_mlp_block_used():
+    """Test that MLPReLUSquaredBlock is actually used when act_layer='ReLUSquared'."""
+    device = "cuda"
+    
+    from cell_observatory_finetune.models.layers.layers import MLPReLUSquaredBlock
+    
+    model = FinetuneSwinUNETR(
+        decoder_args={},
+        decoder="vit",
+        task="boundary_segmentation",
+        output_channels=None,
+        model_template="swin-unetr-small",
+        input_fmt="ZYXC",
+        input_shape=(128, 128, 128, 2),
+        patch_shape=(2, 2, 2),
+        feature_size=24,
+        depths=(2, 2, 2, 2),
+        num_heads=(3, 6, 12, 24),
+        window_size=7,
+        spatial_dims=3,
+        act_layer="ReLUSquared",
+        mlp_type="Mlp",
+    ).to(device)
+    
+    # Check that MLPReLUSquaredBlock is used in the SwinTransformer blocks
+    # The MLP should be an instance of MLPReLUSquaredBlock
+    found_relusquared_mlp = False
+    for name, module in model.named_modules():
+        if isinstance(module, MLPReLUSquaredBlock):
+            found_relusquared_mlp = True
+            # Verify it has the expected structure
+            assert hasattr(module, 'linear1')
+            assert hasattr(module, 'linear2')
+            assert hasattr(module, 'fn')
+            assert hasattr(module, 'drop1')
+            assert hasattr(module, 'drop2')
+            break
+    
+    assert found_relusquared_mlp, "MLPReLUSquaredBlock should be used when act_layer='ReLUSquared'"
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is required for this test")
+def test_swin_unetr_relusquared_4d():
+    """Test ReLUSquared activation with 4D data (TZYXC format)."""
+    device = "cuda"
+    torch.manual_seed(0)
+    
+    B, T, Z, Y, X, C = 1, 4, 128, 128, 128, 2
+    model = FinetuneSwinUNETR(
+        decoder_args={},
+        decoder="vit",
+        task="boundary_segmentation",
+        output_channels=None,
+        model_template="swin-unetr-small",
+        input_fmt="TZYXC",
+        input_shape=(T, Z, Y, X, C),
+        patch_shape=(1, 2, 2, 2),
+        feature_size=24,
+        depths=(2, 2, 2, 2),
+        num_heads=(3, 6, 12, 24),
+        window_size=7,
+        spatial_dims=3,
+        act_layer="ReLUSquared",
+        mlp_type="Mlp",
+    ).to(device)
+    model.eval()
+    
+    inputs = torch.randn(B, T, Z, Y, X, C, dtype=torch.float32, device=device)
+    targets = torch.randint(0, 2, (B, T, Z, Y, X), dtype=torch.float32, device=device)
+    
+    data_sample = {
+        "data_tensor": inputs,
+        "metainfo": {
+            "targets": [targets],
+            "masks": [None],
+        },
+    }
+    
+    with torch.no_grad():
+        loss_dict, predictions = model.forward(data_sample)
+    
+    # Verify outputs
+    assert predictions.shape == (B, T, Z, Y, X, 1)
+    assert torch.isfinite(predictions).all()
+    assert torch.isfinite(loss_dict["step_loss"])
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA is required for this test")
+def test_swin_unetr_relusquared_differentiable():
+    """Test that ReLUSquared activation is differentiable."""
+    device = "cuda"
+    torch.manual_seed(0)
+    
+    B, Z, Y, X, C = 1, 64, 64, 64, 2
+    model = FinetuneSwinUNETR(
+        decoder_args={},
+        decoder="vit",
+        task="boundary_segmentation",
+        output_channels=None,
+        model_template="swin-unetr-small",
+        input_fmt="ZYXC",
+        input_shape=(Z, Y, X, C),
+        patch_shape=(2, 2, 2),
+        feature_size=24,
+        depths=(2, 2, 2, 2),
+        num_heads=(3, 6, 12, 24),
+        window_size=7,
+        spatial_dims=3,
+        act_layer="ReLUSquared",
+        mlp_type="Mlp",
+    ).to(device)
+    model.train()
+    
+    inputs = torch.randn(B, Z, Y, X, C, dtype=torch.float32, device=device, requires_grad=True)
+    targets = torch.randint(0, 2, (B, Z, Y, X), dtype=torch.float32, device=device)
+    
+    data_sample = {
+        "data_tensor": inputs,
+        "metainfo": {
+            "targets": [targets],
+            "masks": [None],
+        },
+    }
+    
+    loss_dict, predictions = model.forward(data_sample)
+    loss = loss_dict["step_loss"]
+    
+    # Verify loss is differentiable
+    loss.backward()
+    
+    # Check that gradients exist
+    has_grad = False
+    for param in model.parameters():
+        if param.grad is not None:
+            has_grad = True
+            assert torch.isfinite(param.grad).all(), "Gradients contain NaN/Inf"
+            break
+    
+    assert has_grad, "No gradients computed"
+

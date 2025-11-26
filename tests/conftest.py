@@ -4,6 +4,12 @@ import pytest
 import logging
 from pathlib import Path
 
+# Add parent directory to Python path to find sibling repository
+_repo_root = Path(__file__).resolve().parent.parent
+_parent_dir = _repo_root.parent
+if str(_parent_dir) not in sys.path:
+    sys.path.insert(0, str(_parent_dir))
+
 from dotenv import load_dotenv
 from hydra.utils import get_method
 from hydra import compose, initialize
